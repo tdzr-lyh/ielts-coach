@@ -1,6 +1,6 @@
 import { DAYS, METHODS, PHASES } from './curriculum.js';
 import {
-  createState, normalizeState, dateKey, calendarInfo, tasksForDay, getCurrentTask,
+  createState, normalizeState, dateKey, calendarInfo, tasksForDay, getCurrentTask, getSelectedTask, selectTask,
   questionsFor, resolveTask, startAttempt, submitAttempt, finishAttempt, completeTask,
   dueReviews, recordReview, getAdaptation, getStats, setExposure,
 } from './model.js';
@@ -12,7 +12,7 @@ const clone = v => JSON.parse(JSON.stringify(v));
 const subjectName = s => s === 'reading' ? '阅读' : s === 'listening' ? '听力' : s === 'vocabulary' ? '词汇与回忆' : '学习小结';
 const kindName = k => ({practice:'专项练习',diagnostic:'阶段诊断',mock:'完整模考',analysis:'精读 / 精听',review:'错题重练',wrapup:'考前巩固'}[k] || '学习任务');
 const PREFIX = 'ielts-coach-state-v1:';
-const runtime = { user:null, view:'today', methodFilter:'all', reviewFilter:'due', focusAttempt:null, timer:null, timerBase:0, timerStart:0, saveTimer:null, toastTimer:null, authMode:'login', conflict:null };
+const runtime = { user:null, view:'today', methodFilter:'all', reviewFilter:'due', focusAttempt:null, timer:null, timerAttemptId:null, timerBase:0, timerStart:0, saveTimer:null, toastTimer:null, authMode:'login', conflict:null };
 let state = readLocal('guest');
 
 function readLocal(id) {
@@ -72,7 +72,7 @@ function completedAttempt(taskId) { return [...state.attempts].reverse().find(a 
 function activeAttempt(task) {
   if (runtime.focusAttempt) {
     const found = state.attempts.find(a => a.id === runtime.focusAttempt);
-    if (found) return found;
+    if (found?.taskId === task.id) return found;
   }
   return [...state.attempts].reverse().find(a => a.taskId === task.id && !a.completedAt);
 }
@@ -93,10 +93,11 @@ function render() {
   for (const a of state.attempts) {
     const end = a.checkDeadline || (a.subject === 'reading' && ['diagnostic','mock'].includes(a.kind) ? a.deadline : null);
     if (!a.submittedAt && end && new Date(end).getTime() <= Date.now()) {
+      if (a.subject==='reading' && a.questions.length===40) a.elapsedSeconds=Math.max(3600,a.elapsedSeconds || 0);
       submitAttempt(state,a.id); recovered = true;
     }
   }
-  if (recovered) { writeLocal(); toast('考试计时已结束，已锁定截止前保存的答案，请对照教材批改。'); }
+  if (recovered) { persist(); toast('考试计时已结束，已锁定截止前保存的答案，请对照教材批改。'); }
   const route = location.hash.slice(1).split('?')[0];
   runtime.view = ['today','roadmap','methods','reviews','records'].includes(route) ? route : 'today';
   const labels = {today:'今日训练',roadmap:'30天路线',methods:'训练方法',reviews:'错题复习',records:'学习记录'};
@@ -112,21 +113,31 @@ function render() {
   if(active && !active.submittedAt && (active.checkDeadline || active.deadline) && !runtime.timer) startTimer();
 }
 function renderToday() {
-  const pending = getCurrentTask(state);
-  const focus = runtime.focusAttempt ? state.attempts.find(a=>a.id===runtime.focusAttempt) : pending ? activeAttempt(pending) : null;
-  const original = focus ? tasksForDay(state,focus.day).find(t=>t.id===focus.taskId) : pending;
+  const pending = getCurrentTask(state), selected = getSelectedTask(state);
+  const focus = runtime.focusAttempt ? state.attempts.find(a=>a.id===runtime.focusAttempt) : selected ? activeAttempt(selected) || (state.completed[selected.id] ? completedAttempt(selected.id) : null) : null;
+  const original = focus ? tasksForDay(state,focus.day).find(t=>t.id===focus.taskId) : selected;
   const task = original ? (focus ? original : resolveTask(state,original)) : null;
   if (!task) return `${head('30天的练习，已经留下了答案。','回看真实成绩与错题，带着清晰的方法上考场。','YOUR NEXT CHAPTER')}<div class="paper empty-state"><span>✓</span><h2>本轮训练已完成</h2><p>练习完成不等于考试保证。最后几套全新试卷的表现，是下一步最有价值的参考。</p><a class="button" href="#records">查看听读成绩</a></div>`;
   const cal = calendarInfo(state), method = METHODS[task.methodId];
-  const actualTask = focus ? { ...task, ...focus, type:focus.subject, title:focus.title || task.title, resources:focus.resources } : task;
-  const day = actualTask.day;
+  const actualTask = focus ? { ...task, ...focus, id:task.id, type:focus.subject, title:focus.title || task.title, resources:focus.resources } : task;
+  const day = actualTask.day, trainingDay = pending?.day || day;
   const heading = day === 1 && task.type === 'reading' && !focus ? '今天，先把这6道题做明白。' : focus?.completedAt ? '每一次复盘，都算数。' : `第${day}天，一步一步往前走。`;
   const overdue = cal.elapsedDay > day && cal.remaining > 0 ? `<div class="banner warn">日历已到第${cal.elapsedDay}天，当前继续第${day}天的未完任务。先接着练，避免把几天作业堆在一起。</div>` : cal.remaining <= 0 ? `<div class="banner warn">30天日历已结束。未完成的任务仍可接着练；根据目前成绩决定下一轮重点。</div>` : '';
-  return `${head(heading,'打开你的剑桥真题，今天的安排和方法都在这里。')}${overdue}<div class="dashboard"><div>${dueReviews(state).length ? `<div class="banner">有 <b>${dueReviews(state).length}</b> 道错题到期了。先回忆，再看依据。<a class="text-button" href="#reviews">去复习 →</a></div>` : ''}<article class="paper lesson"><header class="lesson-top"><div class="lesson-id"><span class="lesson-day">${String(day).padStart(2,'0')}</span><div><small>DAY ${String(day).padStart(2,'0')} / 30</small><strong>${esc(phaseFor(day)?.title || '基础训练')}</strong></div></div><span class="pill">${subjectName(actualTask.type)} · ${actualTask.minutes || task.minutes} min</span></header>${focus ? renderAttempt(actualTask,focus) : ['practice','diagnostic','mock','review'].includes(task.kind) && questionsFor(task).length ? renderTaskIntro(task,method) : renderGeneral(task)}</article></div>${renderAside(day, pending || task)}</div>`;
+  return `${head(heading,'打开你的剑桥真题，阅读、听力按你喜欢的顺序练。')}${overdue}<div class="dashboard"><div>${renderSubjectPicker(trainingDay,actualTask)}${dueReviews(state).length ? `<div class="banner">有 <b>${dueReviews(state).length}</b> 道错题到期了。先回忆，再看依据。<a class="text-button" href="#reviews">去复习 →</a></div>` : ''}<article class="paper lesson"><header class="lesson-top"><div class="lesson-id"><span class="lesson-day">${String(day).padStart(2,'0')}</span><div><small>DAY ${String(day).padStart(2,'0')} / 30</small><strong>${esc(phaseFor(day)?.title || '基础训练')}</strong></div></div><span class="pill">${subjectName(actualTask.type)} · ${actualTask.minutes || task.minutes} min</span></header>${focus ? renderAttempt(actualTask,focus) : ['practice','diagnostic','mock','review'].includes(task.kind) && questionsFor(task).length ? renderTaskIntro(task,method) : renderGeneral(task)}</article></div>${renderAside(trainingDay, actualTask)}</div>`;
+}
+function taskStatus(task) {
+  if (state.completed[task.id]) return '已完成 · 可回看';
+  const attempt = [...state.attempts].reverse().find(a=>a.taskId===task.id && !a.completedAt);
+  return attempt ? attempt.submittedAt ? '待批改' : '继续练习' : state.taskNotes[task.id]?.text ? '继续复盘' : '未开始';
+}
+function renderSubjectPicker(day, currentTask) {
+  const tasks = tasksForDay(state,day).filter(t=>['reading','listening'].includes(t.type));
+  const ongoingExam = state.attempts.some(a=>!a.submittedAt && ['diagnostic','mock'].includes(a.kind));
+  return `<section class="subject-picker" aria-label="选择今天的训练科目"><div class="picker-caption">第${day}天 · 先练哪一科，由你决定</div><div class="subject-options">${tasks.map(t=>`<button class="subject-option ${t.id===currentTask.id?'active':''}" data-action="select-task" data-task="${t.id}" aria-pressed="${t.id===currentTask.id}"><span class="subject-option-name">${subjectName(t.type)}<small>${t.minutes} min</small></span><span class="subject-option-status ${state.completed[t.id]?'done':''}">${taskStatus(t)} <span aria-hidden="true">↗</span></span></button>`).join('')}</div><p>随时切换，答案和进度分别保存。${ongoingExam?'完整模考切换后仍按原截止时间计时，听力音频须连续播放。':''}</p></section>`;
 }
 function renderAside(day, currentTask) {
   const tasks = tasksForDay(state,day), sum = tasks.reduce((n,t)=>n+t.minutes,0), done = tasks.filter(t=>state.completed[t.id]).length;
-  return `<aside class="right-column"><section class="paper side-panel"><div class="side-title"><h3>今天的训练单</h3><small>${done} / 4 完成</small></div><ol class="daily-track">${tasks.map((t,i)=>`<li class="${state.completed[t.id]?'done':t.id===currentTask.id?'current':''}"><span class="track-number">${state.completed[t.id]?'✓':i+1}</span><span>${subjectName(t.type)}</span><span class="track-minutes">${t.minutes} min</span></li>`).join('')}</ol></section><section class="paper side-panel"><div class="side-title"><h3>专注，也留出休息</h3></div><div class="budget"><strong>${sum/60 === 3.5 ? '3.5' : sum/60}</strong><span>小时 · 分两次练完</span></div><div class="budget-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></div><p class="offline-note">${day<=3?'前3天适应节奏，听读各75分钟。':'听读各90分钟，回忆与词汇50分钟，小结10分钟。'} 每45–60分钟休息10分钟。</p></section><section class="hint-panel"><h3>老师的一句提醒</h3><p>${currentTask.type==='listening'?'第一遍按原速只听一次，记录真实答案。精听时只挑3–5个困难片段，先盲听，再对照文本。':'先看题目要求，再回原文找依据。认识每个词并不是做对题的前提，读懂答案所在的句子更重要。'}</p><a class="text-button" href="#methods">看看具体怎么练 →</a></section><section class="paper side-panel overview-panel"><div class="side-title"><h3>30天，一天一格</h3><a class="text-button" href="#roadmap">全览 ↗</a></div><div class="day-strip">${DAYS.map(d=>`<button class="day-dot ${dayDone(d.day)?'complete':d.day===day?'active':''}" data-action="preview-day" data-day="${d.day}" aria-label="查看第${d.day}天">${d.day}</button>`).join('')}</div><div class="overview-line"><span>已完成 ${DAYS.filter(d=>dayDone(d.day)).length} 天</span><span>目标：听读 6.5</span></div></section></aside>`;
+  return `<aside class="right-column"><section class="paper side-panel"><div class="side-title"><h3>今天的训练单</h3><small>${done} / 4 完成</small></div><p class="track-hint">点击选择，四项顺序自由安排。</p><ul class="daily-track">${tasks.map(t=>`<li class="${state.completed[t.id]?'done':''} ${t.id===currentTask.id?'current':''}"><button data-action="select-task" data-task="${t.id}" aria-pressed="${t.id===currentTask.id}"><span class="track-number">${state.completed[t.id]?'✓':t.type==='reading'?'阅':t.type==='listening'?'听':t.type==='vocabulary'?'词':'记'}</span><span>${subjectName(t.type)}</span><span class="track-minutes">${t.minutes} min</span></button></li>`).join('')}</ul></section><section class="paper side-panel"><div class="side-title"><h3>专注，也留出休息</h3></div><div class="budget"><strong>${sum/60 === 3.5 ? '3.5' : sum/60}</strong><span>小时 · 分两次练完</span></div><div class="budget-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></div><p class="offline-note">${day<=3?'前3天适应节奏，听读各75分钟。':'听读各90分钟，回忆与词汇50分钟，小结10分钟。'} 每45–60分钟休息10分钟。</p></section><section class="hint-panel"><h3>老师的一句提醒</h3><p>${currentTask.type==='listening'?'第一遍按原速只听一次，记录真实答案。精听时只挑3–5个困难片段，先盲听，再对照文本。':'先看题目要求，再回原文找依据。认识每个词并不是做对题的前提，读懂答案所在的句子更重要。'}</p><a class="text-button" href="#methods">看看具体怎么练 →</a></section><section class="paper side-panel overview-panel"><div class="side-title"><h3>30天，一天一格</h3><a class="text-button" href="#roadmap">全览 ↗</a></div><div class="day-strip">${DAYS.map(d=>`<button class="day-dot ${dayDone(d.day)?'complete':d.day===day?'active':''}" data-action="preview-day" data-day="${d.day}" aria-label="查看第${d.day}天">${d.day}</button>`).join('')}</div><div class="overview-line"><span>已完成 ${DAYS.filter(d=>dayDone(d.day)).length} 天</span><span>目标：听读 6.5</span></div></section></aside>`;
 }
 function renderTaskIntro(task,method) {
   const count = questionsFor(task).length, adapt = getAdaptation(state,task);
@@ -202,23 +213,26 @@ function renderRecords() {
 }
 
 function currentFocusedAttempt() {
-  if (runtime.focusAttempt) return state.attempts.find(a=>a.id===runtime.focusAttempt);
-  const task = getCurrentTask(state); return task ? activeAttempt(task) : null;
+  const focus = state.attempts.find(a=>a.id===runtime.focusAttempt);
+  if (focus) return focus;
+  const task = getSelectedTask(state);
+  return task ? activeAttempt(task) || (state.completed[task.id] ? completedAttempt(task.id) : null) : null;
 }
 function currentResolvedTask() {
   const a = currentFocusedAttempt();
   if (a) return tasksForDay(state,a.day).find(t=>t.id===a.taskId);
-  return getCurrentTask(state);
+  return getSelectedTask(state);
 }
 function pauseTimer() {
   if (!runtime.timer) return;
-  const a = currentFocusedAttempt();
-  if (a && !a.submittedAt) a.elapsedSeconds = Math.round(runtime.timerBase + (Date.now()-runtime.timerStart)/1000);
-  clearInterval(runtime.timer); runtime.timer = null; writeLocal(); updateTimerDom();
+  const a = state.attempts.find(a=>a.id===runtime.timerAttemptId);
+  if (a && !a.submittedAt) a.elapsedSeconds = a.subject==='reading' && a.deadline ? 3600-(remainingSeconds(a) ?? 3600) : Math.round(runtime.timerBase + (Date.now()-runtime.timerStart)/1000);
+  clearInterval(runtime.timer); runtime.timer = null; runtime.timerAttemptId = null; writeLocal(); updateTimerDom();
 }
 function startTimer() {
   const a = currentFocusedAttempt(); if (!a || a.submittedAt) return;
   if (runtime.timer) return;
+  runtime.timerAttemptId = a.id;
   runtime.timerBase = Number(a.elapsedSeconds || 0); runtime.timerStart = Date.now();
   runtime.timer = setInterval(timerTick, 1000); updateTimerDom();
 }
@@ -227,9 +241,9 @@ function remainingSeconds(a) {
   return deadline ? Math.max(0, Math.ceil((new Date(deadline).getTime()-Date.now())/1000)) : null;
 }
 function timerTick() {
-  const a = currentFocusedAttempt();
+  const a = state.attempts.find(a=>a.id===runtime.timerAttemptId);
   if (!a || a.submittedAt) { pauseTimer(); return; }
-  a.elapsedSeconds = Math.round(runtime.timerBase+(Date.now()-runtime.timerStart)/1000);
+  a.elapsedSeconds = a.subject==='reading' && a.deadline ? 3600-(remainingSeconds(a) ?? 3600) : Math.round(runtime.timerBase+(Date.now()-runtime.timerStart)/1000);
   if (a.elapsedSeconds%5===0) writeLocal();
   if (remainingSeconds(a)===0) {
     pauseTimer(); submitAttempt(state,a.id); persist(); render(); toast('计时结束，首次答案已保存。请对照教材批改。'); return;
@@ -285,9 +299,12 @@ document.addEventListener('click', async e=>{
   const el=e.target.closest('[data-action]');if(!el)return;
   const action=el.dataset.action;
   try {
-    if(action==='start') {
-      const t=getCurrentTask(state);if(!t||t.id!==el.dataset.task)return;
-      const a=startAttempt(state,resolveTask(state,t));runtime.focusAttempt=a.id;persist();render();startTimer();
+    if(action==='select-task') {
+      pauseTimer();clearTimeout(runtime.saveTimer);
+      selectTask(state,el.dataset.task);runtime.focusAttempt=null;persist();render();window.scrollTo({top:0,behavior:'smooth'});
+    } else if(action==='start') {
+      const t=getSelectedTask(state);if(!t||t.id!==el.dataset.task||state.completed[t.id])return;
+      pauseTimer();const a=startAttempt(state,resolveTask(state,t));runtime.focusAttempt=a.id;persist();render();startTimer();
     } else if(action==='timer-toggle'){
       const a=currentFocusedAttempt();
       if(a&&['diagnostic','mock'].includes(a.kind)){toast('完整诊断与模考按考试条件计时，暂停按钮不能延长作答时间。');if(!runtime.timer)startTimer();return;}
@@ -310,19 +327,19 @@ document.addEventListener('click', async e=>{
       if(!a.reviewChecked){toast('请先回看错题依据，再勾选已批改与复盘。');$('#reviewChecked')?.focus();return;}
       if(['diagnostic','mock'].includes(a.kind)&&a.normalConditions!==true){a.normalConditions=false;a.fresh=false;a.conditionNote='未确认按考试条件完成，不纳入全新完整卷成绩。';}
       finishAttempt(state,a.id);runtime.focusAttempt=a.id;persist();render();window.scrollTo({top:0,behavior:'smooth'});
-    } else if(action==='next'){runtime.focusAttempt=null;render();window.scrollTo({top:0,behavior:'smooth'});}
+    } else if(action==='next'){pauseTimer();runtime.focusAttempt=null;state.selectedTaskId=getCurrentTask(state)?.id||null;persist();render();window.scrollTo({top:0,behavior:'smooth'});}
     else if(action==='listening-check'){
-      const a=currentFocusedAttempt();if(!a||a.subject!=='listening')return;
+      const a=currentFocusedAttempt();if(!a||a.subject!=='listening'||a.submittedAt||a.checkDeadline)return;
       a.checkDeadline=new Date(Date.now()+120000).toISOString();persist();render();startTimer();
     } else if(action==='complete-general'){
-      const t=getCurrentTask(state);if(!t||t.id!==el.dataset.task)return;
+      const t=getSelectedTask(state);if(!t||t.id!==el.dataset.task)return;
       if(t.type==='reflection') {
         const n=state.reflections[t.day];if(!n?.learned?.trim()||!n?.next?.trim()){toast('请写下一个收获和下一次要改的动作。');return;}
       } else if(t.type==='vocabulary'&&!state.vocabulary.some(w=>w.day===t.day)){toast('先从今天的真题中记录至少一个词或同义替换。');return;}
       else if(['analysis','wrapup'].includes(t.kind)){
         const n=state.taskNotes[t.id];if(!n?.checks?.every(Boolean)||n.checks.length<3||!n.text?.trim()){toast('请完成三项回顾，并留下具体复盘笔记。');return;}
       }
-      completeTask(state,t.id);persist();render();window.scrollTo({top:0,behavior:'smooth'});toast('已完成，继续下一项。');
+      completeTask(state,t.id);state.selectedTaskId=getCurrentTask(state)?.id||null;persist();render();window.scrollTo({top:0,behavior:'smooth'});toast('已完成，也可以自由选择下一科。');
     } else if(action==='method-filter'){runtime.methodFilter=el.dataset.filter;render();}
     else if(action==='review-filter'){runtime.reviewFilter=el.dataset.filter;render();}
     else if(action==='review-pass'||action==='review-fail'){
@@ -330,7 +347,7 @@ document.addEventListener('click', async e=>{
       if(action==='review-pass'&&!r?.evidence?.trim()){toast('请先补充教材答案与依据，再确认回忆正确。');return;}
       recordReview(state,el.dataset.id,action==='review-pass');persist();render();toast(action==='review-pass'?'已安排下一轮复习。':'明天再回忆这道题。');
     } else if(action==='preview-day')previewDay(Number(el.dataset.day));
-    else if(action==='return-today'){closeModal();location.hash='today';runtime.focusAttempt=null;render();}
+    else if(action==='return-today'){pauseTimer();closeModal();location.hash='today';runtime.focusAttempt=null;render();}
     else if(action==='account')authModal();
     else if(action==='cloud-help')openModal(`<h2>一次性开启跨设备同步</h2><p>账号功能已接入，需要在你现有的云服务里创建本站独立学习表。本机练习与备份现在就能使用。</p><ol class="step-guide"><li><span>下载下面的建表脚本，打开对应 Supabase 项目的 SQL Editor。</span></li><li><span>粘贴脚本并运行一次，它只创建本站学习表和版本检查函数。</span></li><li><span>回到网站，使用同一邮箱在手机、电脑登录，再点击“读取云端最新记录”。</span></li></ol><div class="button-row"><a class="button" href="./supabase-setup.sql" download>下载建表脚本</a><a class="button secondary" href="./README.md" target="_blank">打开部署说明</a></div>`);
     else if(action==='auth-tab'){runtime.authMode=el.dataset.tab;authModal();}
@@ -338,6 +355,7 @@ document.addEventListener('click', async e=>{
     else if(action==='settings')settingsModal();
     else if(action==='save-settings'){
       const v=$('#startDateInput').value;if(!/^\d{4}-\d{2}-\d{2}$/.test(v)){toast('请选择有效开始日期。');return;}
+      pauseTimer();
       state.profile.startDate=v;
       document.querySelectorAll('[data-exposure]').forEach(input=>setExposure(state,input.dataset.exposure,Number(input.dataset.book),Number(input.dataset.test),input.checked));
       persist();closeModal();runtime.focusAttempt=null;render();toast('已保存，诊断和模考会优先使用未见卷。');
@@ -361,7 +379,7 @@ document.addEventListener('click', async e=>{
 });
 
 document.addEventListener('input', e=>{
-  const el=e.target,a=currentFocusedAttempt(),t=getCurrentTask(state);
+  const el=e.target,a=currentFocusedAttempt(),t=currentResolvedTask();
   if(el.dataset.answer!==undefined&&lockIfExpired(a))return;
   if(el.dataset.answer!==undefined&&a&&!a.submittedAt)a.questions[Number(el.dataset.answer)].answer=el.value;
   else if(el.dataset.evidence!==undefined&&a)a.questions[Number(el.dataset.evidence)].evidence=el.value;
@@ -373,7 +391,7 @@ document.addEventListener('input', e=>{
   saveSoon();
 });
 document.addEventListener('change',e=>{
-  const el=e.target,a=currentFocusedAttempt(),t=getCurrentTask(state);
+  const el=e.target,a=currentFocusedAttempt(),t=currentResolvedTask();
   if(el.dataset.cause!==undefined&&a)a.questions[Number(el.dataset.cause)].cause=el.value;
   else if(el.id==='reviewChecked'&&a)a.reviewChecked=el.checked;
   else if(el.id==='normalConditions'&&a)a.normalConditions=el.checked;
@@ -383,7 +401,7 @@ document.addEventListener('change',e=>{
 });
 document.addEventListener('submit',async e=>{
   if(e.target.id==='vocabForm'){
-    e.preventDefault();const t=getCurrentTask(state);if(!t||t.type!=='vocabulary')return;
+    e.preventDefault();const t=currentResolvedTask();if(!t||t.type!=='vocabulary')return;
     const data=new FormData(e.target);if(state.vocabulary.filter(w=>w.day===t.day).length>=20){toast('每天最多新增20个词，先把已有的记住。');return;}
     const word=String(data.get('word')).trim(),meaning=String(data.get('meaning')).trim();if(!word||!meaning)return;
     state.vocabulary.push({id:crypto.randomUUID(),day:t.day,word,meaning,example:String(data.get('example')).trim(),createdAt:new Date().toISOString()});persist();render();toast('已记下，记得回到原句里复习。');

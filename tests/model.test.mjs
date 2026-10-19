@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DAYS } from '../curriculum.js';
 import {
-  createState, normalizeState, dateKey, calendarInfo, tasksForDay, getCurrentTask,
+  createState, normalizeState, dateKey, calendarInfo, tasksForDay, getCurrentTask, getSelectedTask, selectTask,
   questionsFor, resolveTask, setExposure, startAttempt, submitAttempt, finishAttempt,
   completeTask, dueReviews, recordReview, getAdaptation, getStats,
 } from '../model.js';
@@ -335,4 +335,123 @@ test('D24重做克隆上次题目与教材位置，不重新抽取已变化的�
   assert.equal(state.completed[first.taskId], completedAt);
   assert.equal(state.reviews[0].stage, 1);
   assert.ok(redo.reviewScheduleNote);
+});
+
+test('同一天可自由选择听力先做，选择不会跳过未完成阅读且已完成科目可以回看', () => {
+  const state = createState();
+  assert.equal(state.selectedTaskId, null);
+  assert.equal(getSelectedTask(state).id, 'd1-reading');
+  const listening = selectTask(state, 'd1-listening');
+  assert.equal(listening.id, 'd1-listening');
+  assert.equal(getSelectedTask(state).id, 'd1-listening');
+  assert.equal(getCurrentTask(state).id, 'd1-reading');
+  finish(state, listening, 25);
+  assert.equal(getCurrentTask(state).id, 'd1-reading');
+  assert.equal(getSelectedTask(state).id, 'd1-listening');
+  assert.ok(state.completed['d1-listening']);
+  assert.equal(state.completed['d1-reading'], undefined);
+  assert.equal(selectTask(state, 'd1-reading').id, 'd1-reading');
+  assert.equal(selectTask(state, 'd1-listening').id, 'd1-listening');
+  assert.throws(() => selectTask(state, 'd2-reading'), /当前训练日/);
+  assert.throws(() => selectTask(state, 'd0-listening'), /当前训练日/);
+  assert.equal(getSelectedTask(state).day, 1);
+});
+
+test('两科各自草稿在切换与刷新后恢复，互不覆盖答案、计时或提交状态', () => {
+  let state = createState();
+  const reading = startAttempt(state, selectTask(state, 'd1-reading'));
+  reading.questions[0].answer = 'reading draft';
+  reading.elapsedSeconds = 87;
+  const listening = startAttempt(state, selectTask(state, 'd1-listening'));
+  listening.questions[0].answer = 'listening draft';
+  listening.elapsedSeconds = 214;
+  submitAttempt(state, listening.id);
+  assert.notEqual(reading.id, listening.id);
+  assert.equal(state.drafts['d1-reading'], reading.id);
+  assert.equal(state.drafts['d1-listening'], listening.id);
+  state = normalizeState(JSON.parse(JSON.stringify(state)));
+  assert.equal(state.selectedTaskId, 'd1-listening');
+  assert.equal(getSelectedTask(state).id, 'd1-listening');
+  const resumedListening = startAttempt(state, getSelectedTask(state));
+  assert.equal(resumedListening.id, listening.id);
+  assert.equal(resumedListening.originalAnswers[0].answer, 'listening draft');
+  assert.equal(resumedListening.elapsedSeconds, 214);
+  assert.ok(resumedListening.submittedAt);
+  const resumedReading = startAttempt(state, selectTask(state, 'd1-reading'));
+  assert.equal(resumedReading.id, reading.id);
+  assert.equal(resumedReading.questions[0].answer, 'reading draft');
+  assert.equal(resumedReading.elapsedSeconds, 87);
+  assert.equal(resumedReading.submittedAt, null);
+  assert.equal(getCurrentTask(state).day, 1);
+});
+
+test('整日四项全部完成才前进，旧日选择自动落到下一日且不能跳未完成日', () => {
+  const state = createState();
+  selectTask(state, 'd1-listening');
+  completeTask(state, 'd1-listening');
+  completeTask(state, 'd1-vocabulary');
+  completeTask(state, 'd1-reflection');
+  assert.equal(getCurrentTask(state).id, 'd1-reading');
+  assert.equal(getSelectedTask(state).id, 'd1-listening');
+  completeTask(state, 'd1-reading');
+  assert.equal(getCurrentTask(state).id, 'd2-reading');
+  assert.equal(getSelectedTask(state).id, 'd2-reading');
+  assert.equal(state.selectedTaskId, 'd2-reading');
+  assert.throws(() => selectTask(state, 'd1-listening'), /当前训练日/);
+  selectTask(state, 'd2-listening');
+  // Re-completing an old task cannot override the valid choice on the new day.
+  completeTask(state, 'd1-reading');
+  assert.equal(getSelectedTask(state).id, 'd2-listening');
+  for (let day = 2; day <= 30; day++) for (const task of tasksForDay(state, day)) completeTask(state, task.id);
+  assert.equal(getCurrentTask(state), null);
+  assert.equal(getSelectedTask(state), null);
+  assert.equal(state.selectedTaskId, null);
+  assert.throws(() => selectTask(state, 'd30-reading'), /已完成/);
+});
+
+test('旧数据兼容且非法选择安全回退，合法当前日选择刷新保留', () => {
+  const legacy = normalizeState({ profile: { startDate: '2026-10-19' } });
+  assert.equal(legacy.selectedTaskId, null);
+  assert.equal(getSelectedTask(legacy).id, 'd1-reading');
+  for (const selectedTaskId of ['d0-reading', 'd31-reading', 'd01-reading', 'd1-other', {}, 1, null]) {
+    const normalized = normalizeState({ selectedTaskId });
+    assert.equal(normalized.selectedTaskId, null);
+    assert.equal(getSelectedTask(normalized).id, 'd1-reading');
+  }
+  const valid = normalizeState({ selectedTaskId: 'd1-listening' });
+  assert.equal(getSelectedTask(valid).id, 'd1-listening');
+  const future = normalizeState({ selectedTaskId: 'd2-listening' });
+  assert.equal(getSelectedTask(future).id, 'd1-reading');
+  assert.equal(getCurrentTask(future).day, 1);
+  assert.equal(future.selectedTaskId, 'd2-listening');
+});
+
+test('D14完整卷往返切换及刷新后，阅读截止时间与听力核对截止时间不重置', () => {
+  let state = createState();
+  for (let day = 1; day <= 13; day++) for (const task of tasksForDay(state, day)) completeTask(state, task.id);
+  assert.equal(getCurrentTask(state).day, 14);
+  const reading = startAttempt(state, selectTask(state, 'd14-reading'));
+  assert.equal(reading.questions.length, 40);
+  const readingDeadline = reading.deadline;
+  assert.equal(new Date(readingDeadline) - new Date(reading.startedAt), 3600000);
+  reading.elapsedSeconds = 720;
+  const listening = startAttempt(state, selectTask(state, 'd14-listening'));
+  assert.equal(listening.questions.length, 40);
+  listening.elapsedSeconds = 1800;
+  const listeningCheckDeadline = new Date(Date.now() + 120000).toISOString();
+  listening.checkDeadline = listeningCheckDeadline;
+  assert.equal(startAttempt(state, selectTask(state, 'd14-reading')).id, reading.id);
+  assert.equal(startAttempt(state, selectTask(state, 'd14-listening')).id, listening.id);
+  state = normalizeState(JSON.parse(JSON.stringify(state)));
+  assert.equal(getSelectedTask(state).id, 'd14-listening');
+  const restoredListening = startAttempt(state, getSelectedTask(state));
+  const restoredReading = startAttempt(state, selectTask(state, 'd14-reading'));
+  assert.equal(restoredListening.id, listening.id);
+  assert.equal(restoredListening.checkDeadline, listeningCheckDeadline);
+  assert.equal(restoredListening.elapsedSeconds, 1800);
+  assert.equal(restoredReading.id, reading.id);
+  assert.equal(restoredReading.deadline, readingDeadline);
+  assert.equal(restoredReading.elapsedSeconds, 720);
+  assert.equal(state.attempts.length, 2);
+  assert.equal(getCurrentTask(state).day, 14);
 });

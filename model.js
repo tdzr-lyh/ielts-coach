@@ -8,6 +8,12 @@ const record = value => value && typeof value === 'object' && !Array.isArray(val
 const uid = prefix => `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 const instant = value => (value instanceof Date ? value : new Date(value ?? Date.now())).toISOString();
 const exposureKey = (subject, book, test) => `${subject}-${book}-${test}`;
+const TASK_ID = /^d([1-9]|[12]\d|30)-(reading|listening|vocabulary|reflection)$/;
+
+function validTaskId(value) {
+  const match = typeof value === 'string' && value.match(TASK_ID);
+  return !!match && DAYS.some(day => day.day === Number(match[1]));
+}
 
 function validDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -61,7 +67,7 @@ export function createState() {
   return {
     version: 1,
     profile: { startDate: dateKey(), baseline: 3.5, target: 6.5 },
-    completed: {}, drafts: {}, taskNotes: {}, assignments: {}, attempts: [], reviews: [],
+    completed: {}, drafts: {}, taskNotes: {}, assignments: {}, attempts: [], reviews: [], selectedTaskId: null,
     exposures: {}, vocabulary: [], reflections: {},
   };
 }
@@ -108,6 +114,7 @@ export function normalizeState(raw) {
     .map(([key, value]) => [key, { ...value, resources: cleanResources(value.resources) }]));
   return {
     ...base, ...source, version: 1,
+    selectedTaskId: validTaskId(source.selectedTaskId) ? source.selectedTaskId : null,
     profile: { ...base.profile, ...importedProfile,
       startDate: validDate(importedProfile.startDate) ? importedProfile.startDate : base.profile.startDate,
       baseline: scoreValue(importedProfile.baseline, 3.5), target: scoreValue(importedProfile.target, 6.5),
@@ -203,6 +210,22 @@ export function getCurrentTask(state) {
     if (task) return task;
   }
   return null;
+}
+
+/** Selection changes the visible task, never the earliest unfinished study day. */
+export function getSelectedTask(state) {
+  const recommended = getCurrentTask(state);
+  if (!recommended) return null;
+  return tasksForDay(state, recommended.day).find(task => task.id === state.selectedTaskId) || recommended;
+}
+
+export function selectTask(state, taskId) {
+  const current = getCurrentTask(state);
+  if (!current) throw new Error('本轮30天训练已完成，可在学习记录中回看练习。');
+  const selected = validTaskId(taskId) && tasksForDay(state, current.day).find(task => task.id === taskId);
+  if (!selected) throw new Error('只能切换当前训练日的任务，请先完成这一天的练习。');
+  state.selectedTaskId = selected.id;
+  return selected;
 }
 
 export function questionsFor(task) {
@@ -387,8 +410,11 @@ export function finishAttempt(state, attemptId) {
 }
 
 export function completeTask(state, taskId) {
-  if (!/^d(?:[1-9]|[12]\d|30)-(?:reading|listening|vocabulary|reflection)$/.test(taskId)) throw new Error('训练任务无效。');
+  if (!validTaskId(taskId)) throw new Error('训练任务无效。');
   if (!state.completed[taskId]) state.completed[taskId] = new Date().toISOString();
+  const current = getCurrentTask(state);
+  if (!current) state.selectedTaskId = null;
+  else if (!tasksForDay(state, current.day).some(task => task.id === state.selectedTaskId)) state.selectedTaskId = current.id;
   return state.completed[taskId];
 }
 
