@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { DAYS } from '../curriculum.js';
 import {
   createState, normalizeState, dateKey, calendarInfo, tasksForDay, getCurrentTask, getSelectedTask, selectTask,
-  questionsFor, resolveTask, setExposure, startAttempt, submitAttempt, finishAttempt,
-  completeTask, dueReviews, recordReview, getAdaptation, getStats,
+  questionsFor, resolveTask, setExposure, startAttempt, beginSelfCheck, setExternalDuration, submitAttempt, finishAttempt,
+  completeTask, dueReviews, recordReview, getAdaptation, getStats, isFreshFullAttempt,
 } from '../model.js';
 
 function task(subject = 'reading', day = 1, { book = 19, test = 1, from = 1, to = 40, kind = 'diagnostic' } = {}) {
@@ -14,22 +14,24 @@ function task(subject = 'reading', day = 1, { book = 19, test = 1, from = 1, to 
 function finish(state, selected, correct = 30) {
   const attempt = startAttempt(state, selected);
   attempt.questions.forEach((question, index) => {
-    question.answer = `answer-${index + 1}`;
     question.correct = index < correct;
     if (!question.correct) { question.cause = '同义替换'; question.evidence = '原文定位句'; }
   });
+  attempt.normalConditions ??= true;
   submitAttempt(state, attempt.id);
   return finishAttempt(state, attempt.id);
 }
 
-test('30天课程每天4项且首3天210分钟、后续240分钟', () => {
+test('30天课程每天4项，听力尊重课程时长且阅读维持阶段预算', () => {
   const state = createState();
   assert.equal(DAYS.length, 30);
   const ids = new Set();
   for (let day = 1; day <= 30; day++) {
     const tasks = tasksForDay(state, day);
     assert.equal(tasks.length, 4);
-    assert.equal(tasks.reduce((sum, item) => sum + item.minutes, 0), day <= 3 ? 210 : 240);
+    assert.equal(tasks[0].minutes, day <= 3 ? 75 : 90);
+    assert.equal(tasks[1].minutes, DAYS[day - 1].listening.minutes);
+    assert.equal(tasks.reduce((sum, item) => sum + item.minutes, 0), (day <= 3 ? 75 : 90) + DAYS[day - 1].listening.minutes + 60);
     for (const item of tasks) {
       assert.ok(!ids.has(item.id));
       ids.add(item.id);
@@ -108,7 +110,7 @@ test('全部备用卷已见时明确复测，手动取消标记也不会洗白�
 test('未提交不能完成；自评必须逐题完成；首次答案独立锁定', () => {
   const state = createState();
   const selected = task('reading', 1, { book: 17, test: 1, to: 6, kind: 'practice' });
-  const attempt = startAttempt(state, selected);
+  const attempt = startAttempt(state, selected, { recordingMode: 'answer-entry' });
   assert.equal(startAttempt(state, selected), attempt);
   attempt.questions[0].answer = 'original';
   assert.throws(() => finishAttempt(state, attempt.id), /先提交/);
@@ -134,8 +136,7 @@ test('首次新卷40题与重做分开统计，专项不能估算分数', () => 
   const state = createState();
   const selected = task();
   const first = finish(state, selected, 25);
-  assert.ok(first.deadline.endsWith('Z'));
-  assert.equal(new Date(first.deadline) - new Date(first.startedAt), 3600000);
+  assert.equal(first.deadline, undefined);
   assert.equal(first.score.raw40, 25);
   const repeated = finish(state, selected, 35);
   assert.equal(repeated.redo, true);
@@ -204,7 +205,7 @@ test('第7天不足70%与第14天不足23/40触发补强且不加总时长', () 
   assert.equal(getAdaptation(state, { type: 'reading', day: 15 }).minutes, 30);
   assert.equal(getAdaptation(state, { type: 'reading', day: 17 }).minutes, 30);
   assert.equal(getAdaptation(state, { type: 'reading', day: 18 }), null);
-  assert.equal(tasksForDay(state, 15).reduce((sum, item) => sum + item.minutes, 0), 240);
+  assert.equal(tasksForDay(state, 15)[0].minutes, 90);
 });
 
 test('normalize恢复计时、答案、首次快照和未知字段，不修改原记录', () => {
@@ -212,7 +213,7 @@ test('normalize恢复计时、答案、首次快照和未知字段，不修改�
   state.futureCloudField = { version: 3 };
   state.profile.futurePreference = true;
   state.taskNotes['d1-reading'] = { note: '明天精读' };
-  const attempt = startAttempt(state, task());
+  const attempt = startAttempt(state, task(), { recordingMode: 'answer-entry' });
   attempt.elapsedSeconds = 107;
   attempt.questions[0].answer = 'draft';
   submitAttempt(state, attempt.id);
@@ -323,7 +324,7 @@ test('D24重做克隆上次题目与教材位置，不重新抽取已变化的�
   assert.deepEqual(redo.resources, first.resources);
   assert.deepEqual(redo.questions.map(question => question.number), [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.equal(redo.questions[0].reviewId, 'r1');
-  assert.equal(redo.questions[0].answer, '');
+  assert.equal(Object.hasOwn(redo.questions[0], 'answer'), false);
   assert.equal(redo.questions[0].correct, null);
   assert.equal(redo.questions[0].cause, '');
   assert.equal(redo.questions[0].evidence, '');
@@ -359,10 +360,10 @@ test('同一天可自由选择听力先做，选择不会跳过未完成阅读�
 
 test('两科各自草稿在切换与刷新后恢复，互不覆盖答案、计时或提交状态', () => {
   let state = createState();
-  const reading = startAttempt(state, selectTask(state, 'd1-reading'));
+  const reading = startAttempt(state, selectTask(state, 'd1-reading'), { recordingMode: 'answer-entry' });
   reading.questions[0].answer = 'reading draft';
   reading.elapsedSeconds = 87;
-  const listening = startAttempt(state, selectTask(state, 'd1-listening'));
+  const listening = startAttempt(state, selectTask(state, 'd1-listening'), { recordingMode: 'answer-entry' });
   listening.questions[0].answer = 'listening draft';
   listening.elapsedSeconds = 214;
   submitAttempt(state, listening.id);
@@ -426,17 +427,17 @@ test('旧数据兼容且非法选择安全回退，合法当前日选择刷新�
   assert.equal(future.selectedTaskId, 'd2-listening');
 });
 
-test('D14完整卷往返切换及刷新后，阅读截止时间与听力核对截止时间不重置', () => {
+test('旧版双科答题草稿切换及刷新后，已存阅读和听力截止时间保持兼容', () => {
   let state = createState();
   for (let day = 1; day <= 13; day++) for (const task of tasksForDay(state, day)) completeTask(state, task.id);
   assert.equal(getCurrentTask(state).day, 14);
-  const reading = startAttempt(state, selectTask(state, 'd14-reading'));
+  const reading = startAttempt(state, selectTask(state, 'd14-reading'), { recordingMode: 'answer-entry' });
   assert.equal(reading.questions.length, 40);
   const readingDeadline = reading.deadline;
   assert.equal(new Date(readingDeadline) - new Date(reading.startedAt), 3600000);
   reading.elapsedSeconds = 720;
-  const listening = startAttempt(state, selectTask(state, 'd14-listening'));
-  assert.equal(listening.questions.length, 40);
+  const listening = startAttempt(state, selectTask(state, 'd14-listening'), { recordingMode: 'answer-entry' });
+  assert.ok(listening.questions.length > 0);
   listening.elapsedSeconds = 1800;
   const listeningCheckDeadline = new Date(Date.now() + 120000).toISOString();
   listening.checkDeadline = listeningCheckDeadline;
@@ -454,4 +455,204 @@ test('D14完整卷往返切换及刷新后，阅读截止时间与听力核对�
   assert.equal(restoredReading.elapsedSeconds, 720);
   assert.equal(state.attempts.length, 2);
   assert.equal(getCurrentTask(state).day, 14);
+});
+
+test('新建练习直接逐题标对错，不产生空答案、首次答案快照或站内倒计时', () => {
+  const state = createState();
+  const selected = task('reading', 1, { book: 17, test: 1, to: 6, kind: 'practice' });
+  const attempt = startAttempt(state, selected);
+  assert.equal(attempt.recordingMode, 'self-check');
+  assert.equal(attempt.submittedAt, attempt.startedAt);
+  assert.equal(attempt.deadline, undefined);
+  assert.equal(attempt.checkDeadline, undefined);
+  assert.equal(attempt.durationProvided, false);
+  assert.equal(attempt.originalAnswers, undefined);
+  assert.ok(attempt.questions.every(question => !Object.hasOwn(question, 'answer')));
+  assert.equal(state.exposures['reading-17-1'].seen, true);
+  assert.throws(() => finishAttempt(state, attempt.id), /逐题/);
+  submitAttempt(state, attempt.id);
+  assert.equal(attempt.originalAnswers, undefined);
+  attempt.questions.forEach((question, index) => question.correct = index !== 0);
+  finishAttempt(state, attempt.id);
+  assert.equal(attempt.score.correct, 5);
+  assert.equal(attempt.score.total, 6);
+  assert.equal(state.reviews.length, 1);
+  assert.equal(Object.hasOwn(state.reviews[0], 'answer'), false);
+  const restored = normalizeState(state);
+  assert.equal(restored.attempts[0].recordingMode, 'self-check');
+  assert.equal(Object.hasOwn(restored.attempts[0].questions[0], 'answer'), false);
+  assert.equal(Object.hasOwn(restored.reviews[0], 'answer'), false);
+});
+
+test('外部做题用时可不填、填写或清除，切换刷新不会产生内部截止时间', () => {
+  let state = createState();
+  const reading = startAttempt(state, selectTask(state, 'd1-reading'));
+  const listening = startAttempt(state, selectTask(state, 'd1-listening'));
+  setExternalDuration(state, reading.id, 1200.4);
+  assert.equal(reading.elapsedSeconds, 1200);
+  assert.equal(reading.durationProvided, true);
+  assert.equal(reading.durationSource, 'external');
+  assert.equal(listening.elapsedSeconds, 0);
+  assert.equal(listening.durationProvided, false);
+  assert.throws(() => setExternalDuration(state, reading.id, -1), /有效/);
+  assert.throws(() => setExternalDuration(state, reading.id, Infinity), /有效/);
+  assert.throws(() => setExternalDuration(state, reading.id, '20'), /有效/);
+  state = normalizeState(JSON.parse(JSON.stringify(state)));
+  const restored = startAttempt(state, selectTask(state, 'd1-reading'));
+  assert.equal(restored.id, reading.id);
+  assert.equal(restored.elapsedSeconds, 1200);
+  assert.equal(restored.durationProvided, true);
+  assert.equal(restored.deadline, undefined);
+  setExternalDuration(state, restored.id, null);
+  assert.equal(restored.elapsedSeconds, 0);
+  assert.equal(restored.durationProvided, false);
+  setExternalDuration(state, restored.id, 0);
+  assert.equal(restored.durationProvided, true);
+});
+
+test('旧答题记录可转逐题自评并保留答案快照和历史计时，完成记录不会被改写', () => {
+  const state = createState();
+  const selected = task('reading', 1, { to: 2, kind: 'practice' });
+  const old = startAttempt(state, selected, { recordingMode: 'answer-entry' });
+  old.questions[0].answer = 'real old answer';
+  old.elapsedSeconds = 52;
+  submitAttempt(state, old.id);
+  const originalAnswers = JSON.stringify(old.originalAnswers);
+  beginSelfCheck(state, old.id);
+  assert.equal(old.recordingMode, 'self-check');
+  assert.equal(old.questions[0].answer, 'real old answer');
+  assert.equal(JSON.stringify(old.originalAnswers), originalAnswers);
+  assert.equal(old.elapsedSeconds, 52);
+  old.questions[0].correct = false;
+  old.questions[1].correct = true;
+  finishAttempt(state, old.id);
+  assert.equal(state.reviews[0].answer, 'real old answer');
+  const completedSnapshot = JSON.stringify(old);
+  beginSelfCheck(state, old.id);
+  assert.equal(JSON.stringify(old), completedSnapshot);
+  const unsubmitted = startAttempt(state, task('listening', 1, { to: 2, kind: 'practice' }), { recordingMode: 'answer-entry' });
+  unsubmitted.questions[0].answer = 'unsent draft';
+  beginSelfCheck(state, unsubmitted.id);
+  assert.ok(unsubmitted.submittedAt);
+  assert.equal(unsubmitted.questions[0].answer, 'unsent draft');
+  assert.equal(unsubmitted.originalAnswers, undefined);
+});
+
+test('自评完整卷必须明确确认正常考试条件，不能把未确认的记录算作新卷基准', () => {
+  const unconfirmed = createState();
+  const attempt = startAttempt(unconfirmed, task());
+  attempt.questions.forEach(question => question.correct = true);
+  finishAttempt(unconfirmed, attempt.id);
+  assert.equal(attempt.fresh, true);
+  assert.equal(attempt.normalConditions, undefined);
+  assert.equal(attempt.score.correct, 40);
+  assert.equal(attempt.score.raw40, null);
+  assert.equal(getStats(unconfirmed).reading.raw40.length, 0);
+  const confirmed = createState();
+  const valid = startAttempt(confirmed, task());
+  valid.questions.forEach(question => question.correct = true);
+  valid.normalConditions = true;
+  finishAttempt(confirmed, valid.id);
+  assert.equal(valid.score.raw40, 40);
+  assert.equal(getStats(confirmed).reading.latest40.correct, 40);
+  assert.equal(valid.deadline, undefined);
+});
+
+test('第14天听力20题专项不足70%只调配20分钟，阅读仍用40题23分门槛', () => {
+  const state = createState();
+  finish(state, task('listening', 14, { book: 16, test: 4, to: 20, kind: 'practice' }), 13);
+  const extra = getAdaptation(state, { type: 'listening', day: 15 });
+  assert.equal(extra.minutes, 20);
+  assert.match(extra.reason, /13\/20/);
+  assert.equal(getAdaptation(state, { type: 'listening', day: 17 }).minutes, 20);
+  assert.equal(getAdaptation(state, { type: 'listening', day: 18 }), null);
+  assert.equal(getStats(state).listening.raw40.length, 0);
+  const atThreshold = createState();
+  finish(atThreshold, task('listening', 14, { book: 16, test: 4, to: 20, kind: 'practice' }), 14);
+  assert.equal(getAdaptation(atThreshold, { type: 'listening', day: 15 }), null);
+  finish(state, task('reading', 14, { book: 19, test: 2 }), 22);
+  assert.equal(getAdaptation(state, { type: 'reading', day: 15 }).minutes, 30);
+});
+
+test('听力从5题起步，仅保留三套完整卷，每日做题复盘拼写回忆合计等于预算', () => {
+  const state = createState();
+  assert.equal(questionsFor(tasksForDay(state, 1)[1]).length, 5);
+  assert.equal(questionsFor(tasksForDay(state, 7)[1]).length, 10);
+  assert.equal(questionsFor(tasksForDay(state, 14)[1]).length, 20);
+  const full = DAYS.filter(day => ['diagnostic', 'mock'].includes(day.listening.kind));
+  assert.deepEqual(full.map(day => [day.day, day.listening.resources[0].book, day.listening.resources[0].test]), [[21, 19, 2], [27, 18, 1], [29, 18, 2]]);
+  for (const day of DAYS) {
+    const plan = day.listening.listeningPlan;
+    assert.equal(plan.firstPassMinutes + plan.reviewMinutes + plan.spellingMinutes + plan.recallMinutes, day.listening.minutes);
+    assert.ok(day.listening.minutes <= 75);
+  }
+});
+
+test('无模式旧草稿经normalize迁移后，已记录用时继续显示；显式未填的自评用时不被改写', () => {
+  const state = normalizeState({ attempts: [{ id: 'legacy', taskId: 'd1-reading', subject: 'reading', day: 1, kind: 'practice',
+    resources: [{ book: 17, test: 1, unit: 1, from: 1, to: 2 }],
+    questions: [{ id: 'reading-17-1-1', book: 17, test: 1, unit: 1, number: 1, answer: 'old answer' }],
+    startedAt: '2026-10-19T08:00:00Z', submittedAt: null, completedAt: null,
+    elapsedSeconds: 123, durationProvided: false,
+  }] });
+  const old = state.attempts[0];
+  assert.equal(old.recordingMode, 'answer-entry');
+  beginSelfCheck(state, old.id);
+  assert.equal(old.recordingMode, 'self-check');
+  assert.equal(old.elapsedSeconds, 123);
+  assert.equal(old.durationProvided, true);
+  assert.equal(old.durationSource, 'legacy-timer');
+  assert.equal(old.questions[0].answer, 'old answer');
+  const fresh = startAttempt(state, task('listening', 1, { to: 5, kind: 'practice' }));
+  fresh.elapsedSeconds = 99;
+  fresh.durationProvided = false;
+  beginSelfCheck(state, fresh.id);
+  assert.equal(fresh.durationProvided, false);
+  assert.equal(fresh.durationSource, 'external');
+});
+
+test('旧版听力整卷复盘使用实际题量和教材，保留新版短精听预算', () => {
+  const state = createState();
+  const old = finish(state, task('listening', 1, { book: 19, test: 1 }), 18);
+  const review = tasksForDay(state, 2)[1];
+  assert.equal(review.kind, 'analysis');
+  assert.equal(review.title, '复盘第1天听力 · 实际40题');
+  assert.equal(review.analysisOf, old.id);
+  assert.deepEqual(review.resources, old.resources);
+  assert.equal(review.minutes, DAYS[1].listening.minutes);
+  assert.deepEqual(review.listeningPlan, DAYS[1].listening.listeningPlan);
+  assert.ok(review.minutes <= 75);
+  assert.deepEqual(questionsFor(review), []);
+});
+
+test('旧版第14天听力40题诊断仍按23题门槛调配30分钟，不误套20题规则', () => {
+  const state = createState();
+  finish(state, task('listening', 14, { book: 19, test: 2 }), 22);
+  const extra = getAdaptation(state, { type: 'listening', day: 15 });
+  assert.equal(extra.minutes, 30);
+  assert.match(extra.reason, /22\/40/);
+  assert.match(extra.reason, /旧版/);
+  assert.equal(getAdaptation(state, { type: 'listening', day: 17 }).minutes, 30);
+  assert.equal(getAdaptation(state, { type: 'listening', day: 18 }), null);
+  const threshold = createState();
+  finish(threshold, task('listening', 14, { book: 19, test: 2 }), 23);
+  assert.equal(getAdaptation(threshold, { type: 'listening', day: 15 }), null);
+});
+
+test('完整新卷统一判定排除专项、重复题号、重做和未确认条件', () => {
+  const state = createState();
+  const full = finish(state, task(), 30);
+  assert.equal(isFreshFullAttempt(full), true);
+  assert.equal(isFreshFullAttempt(null), false);
+  assert.equal(isFreshFullAttempt({}), false);
+  assert.equal(isFreshFullAttempt({ ...full, kind: 'practice' }), false);
+  assert.equal(isFreshFullAttempt({ ...full, redo: true }), false);
+  assert.equal(isFreshFullAttempt({ ...full, fresh: false }), false);
+  assert.equal(isFreshFullAttempt({ ...full, normalConditions: undefined }), false);
+  assert.equal(isFreshFullAttempt({ ...full, score: { ...full.score, raw40: null } }), false);
+  assert.equal(isFreshFullAttempt({ ...full, questions: Array(40).fill(full.questions[0]) }), false);
+  assert.equal(isFreshFullAttempt({ ...full, questions: Array(40).fill(null) }), false);
+  const legacy = { ...full, recordingMode: 'answer-entry', normalConditions: undefined };
+  assert.equal(isFreshFullAttempt(legacy), true);
+  assert.equal(getStats(state).reading.raw40.length, state.attempts.filter(isFreshFullAttempt).length);
 });

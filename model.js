@@ -80,10 +80,12 @@ export function normalizeState(raw) {
   const attempts = Array.isArray(source.attempts) ? source.attempts.filter(item => item && typeof item === 'object' &&
     typeof item.id === 'string' && typeof item.taskId === 'string' && SUBJECTS.includes(item.subject)).map(attempt => ({
       ...attempt,
+      recordingMode: attempt.recordingMode === 'self-check' ? 'self-check' : 'answer-entry',
       resources: cleanResources(attempt.resources),
       elapsedSeconds: Number.isFinite(Number(attempt.elapsedSeconds)) ? Math.max(0, Number(attempt.elapsedSeconds)) : 0,
       questions: Array.isArray(attempt.questions) ? attempt.questions.filter(validQuestion).map(question => ({
-        ...question, answer: String(question.answer ?? ''), correct: typeof question.correct === 'boolean' ? question.correct : null,
+        ...question, ...(Object.hasOwn(question, 'answer') ? { answer: String(question.answer ?? '') } : {}),
+        correct: typeof question.correct === 'boolean' ? question.correct : null,
         cause: String(question.cause ?? ''), evidence: String(question.evidence ?? ''),
       })) : [],
       ...(Array.isArray(attempt.originalAnswers) ? { originalAnswers: attempt.originalAnswers.filter(item => item && typeof item.id === 'string').map(item => ({ ...item, answer: String(item.answer ?? '') })) } : {}),
@@ -96,7 +98,7 @@ export function normalizeState(raw) {
       return { ...item, createdAt, dueDate: validDate(item.dueDate) ? item.dueDate : addDays(createdAt, 1),
         stage: Number.isInteger(item.stage) && item.stage >= 0 && item.stage <= 3 ? item.stage : 0,
         failures: Number.isInteger(item.failures) && item.failures > 0 ? item.failures : 1,
-        completed: item.completed === true, answer: String(item.answer ?? ''),
+        completed: item.completed === true, ...(Object.hasOwn(item, 'answer') ? { answer: String(item.answer ?? '') } : {}),
         cause: String(item.cause || '待分析'), evidence: String(item.evidence ?? ''),
         history: Array.isArray(item.history) ? item.history.filter(entry => entry && typeof entry === 'object') : [],
       };
@@ -151,7 +153,7 @@ export function tasksForDay(state, day) {
     const source = entry[subject];
     const task = {
       ...copy(source), id: `d${entry.day}-${subject}`, day: entry.day, type: subject, subject,
-      minutes: entry.day <= 3 ? 75 : 90,
+      minutes: subject === 'listening' && Number.isFinite(source.minutes) && source.minutes > 0 ? source.minutes : entry.day <= 3 ? 75 : 90,
       resources: copy(source.resources || []),
     };
     if (source.sourceDay) {
@@ -159,6 +161,7 @@ export function tasksForDay(state, day) {
       if (original) {
         task.resources = copy(original.resources);
         task.analysisOf = original.id;
+        if (subject === 'listening' && task.kind === 'analysis') task.title = `复盘第${source.sourceDay}天听力 · 实际${original.questions.length}题`;
       }
     }
     if (entry.day === 24 && task.kind === 'review') {
@@ -311,7 +314,7 @@ export function setExposure(state, subject, book, test, value) {
   };
 }
 
-export function startAttempt(state, task) {
+export function startAttempt(state, task, options = {}) {
   const active = state.attempts.find(attempt => attempt.taskId === task.id && !attempt.completedAt);
   if (active) return active;
   const previous = [...state.attempts].reverse().find(attempt => attempt.taskId === task.id && attempt.completedAt);
@@ -320,19 +323,27 @@ export function startAttempt(state, task) {
   // A redo is the same paper/questions, even if the dynamic due queue has moved.
   const sourceQuestions = previous ? copy(previous.questions) : questionsFor(resolved);
   const startedAt = new Date().toISOString();
+  // Answer entry remains available only for compatibility with existing records.
+  const recordingMode = options.recordingMode === 'answer-entry' ? 'answer-entry' : 'self-check';
   const attempt = {
     id: uid('attempt'), taskId: task.id, subject: task.type || task.subject, day: task.day,
     kind: previous?.kind || task.kind, title: previous?.title || task.title || '', methodId: previous?.methodId || task.methodId || '', minutes: previous?.minutes ?? task.minutes,
     resources: copy(resolved.resources || []),
-    questions: sourceQuestions.map(question => ({ ...question, answer: '', correct: null, cause: '', evidence: '' })),
-    startedAt, submittedAt: null, completedAt: null, elapsedSeconds: 0,
+    questions: sourceQuestions.map(question => {
+      const { answer, correctAnswer, ...position } = question;
+      return { ...position, ...(recordingMode === 'answer-entry' ? { answer: '' } : {}), correct: null, cause: '', evidence: '' };
+    }),
+    recordingMode, startedAt, submittedAt: recordingMode === 'self-check' ? startedAt : null,
+    completedAt: null, elapsedSeconds: 0, durationProvided: false,
+    durationSource: recordingMode === 'self-check' ? 'external' : 'legacy-timer',
     fresh: !!resolved.fresh && !redo, redo,
   };
-  if (attempt.subject === 'reading' && ['diagnostic', 'mock'].includes(attempt.kind) && attempt.questions.length === 40) {
+  if (recordingMode === 'answer-entry' && attempt.subject === 'reading' && ['diagnostic', 'mock'].includes(attempt.kind) && attempt.questions.length === 40) {
     attempt.deadline = new Date(new Date(startedAt).getTime() + 3600000).toISOString();
   }
   state.attempts.push(attempt);
   state.drafts[task.id] = attempt.id;
+  if (recordingMode === 'self-check') markAttemptExposed(state, attempt);
   return attempt;
 }
 
@@ -348,8 +359,43 @@ function markAttemptExposed(state, attempt) {
   }
 }
 
+/** Switch an existing answer draft to grading without fabricating blank answers. */
+export function beginSelfCheck(state, attemptId) {
+  const attempt = requireAttempt(state, attemptId);
+  if (attempt.completedAt) return attempt;
+  const migratingLegacy = attempt.recordingMode !== 'self-check';
+  attempt.recordingMode = 'self-check';
+  attempt.submittedAt ||= new Date().toISOString();
+  if (migratingLegacy && Number(attempt.elapsedSeconds) > 0) {
+    attempt.durationProvided = true;
+    attempt.durationSource = 'legacy-timer';
+  } else {
+    attempt.durationProvided ??= false;
+    attempt.durationSource ||= 'external';
+  }
+  markAttemptExposed(state, attempt);
+  return attempt;
+}
+
+/** Optional duration is copied from the learner's external practice session. */
+export function setExternalDuration(state, attemptId, seconds) {
+  const attempt = requireAttempt(state, attemptId);
+  if (seconds === null || seconds === undefined || seconds === '') {
+    attempt.elapsedSeconds = 0;
+    attempt.durationProvided = false;
+    attempt.durationSource = 'external';
+    return attempt;
+  }
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) throw new Error('请填写有效的外部做题用时，或留空。');
+  attempt.elapsedSeconds = Math.round(seconds);
+  attempt.durationProvided = true;
+  attempt.durationSource = 'external';
+  return attempt;
+}
+
 export function submitAttempt(state, attemptId) {
   const attempt = requireAttempt(state, attemptId);
+  if (attempt.recordingMode === 'self-check') return beginSelfCheck(state, attemptId);
   if (attempt.submittedAt) return attempt;
   attempt.submittedAt = new Date().toISOString();
   attempt.originalAnswers = attempt.questions.map(question => ({ id: question.id, answer: String(question.answer ?? '') }));
@@ -358,10 +404,19 @@ export function submitAttempt(state, attemptId) {
 }
 
 function fullPaper(attempt) {
-  if (!['diagnostic', 'mock'].includes(attempt.kind) || attempt.questions.length !== 40) return false;
+  if (!attempt || !['diagnostic', 'mock'].includes(attempt.kind) || !Array.isArray(attempt.questions) || attempt.questions.length !== 40 || attempt.questions.some(question => !question || typeof question !== 'object')) return false;
   const groups = new Set(attempt.questions.map(question => `${question.book}-${question.test}`));
   const numbers = new Set(attempt.questions.map(question => question.number));
   return groups.size === 1 && numbers.size === 40 && [...numbers].every(number => number >= 1 && number <= 40);
+}
+
+function validConditions(attempt) {
+  return attempt.recordingMode === 'self-check' ? attempt.normalConditions === true : attempt.normalConditions !== false;
+}
+
+/** Single criterion for charts, summaries and record labels. */
+export function isFreshFullAttempt(attempt) {
+  return !!(fullPaper(attempt) && Number.isFinite(attempt.score?.raw40) && attempt.score.raw40 >= 0 && attempt.score.raw40 <= 40 && attempt.fresh && !attempt.redo && validConditions(attempt));
 }
 
 export function finishAttempt(state, attemptId) {
@@ -372,7 +427,7 @@ export function finishAttempt(state, attemptId) {
   const completedAt = new Date().toISOString();
   const correct = attempt.questions.filter(question => question.correct).length;
   const total = attempt.questions.length;
-  attempt.score = { correct, total, accuracy: total ? Math.round(correct / total * 1000) / 10 : null, raw40: fullPaper(attempt) && attempt.normalConditions !== false && attempt.fresh && !attempt.redo ? correct : null };
+  attempt.score = { correct, total, accuracy: total ? Math.round(correct / total * 1000) / 10 : null, raw40: fullPaper(attempt) && validConditions(attempt) && attempt.fresh && !attempt.redo ? correct : null };
   attempt.correctCount = correct;
   attempt.total = total;
   // Reconstruct locked answers so manual grading never overwrites first responses.
@@ -396,7 +451,7 @@ export function finishAttempt(state, attemptId) {
     state.reviews.push({
       id: uid('review'), questionId: question.id, taskId: attempt.taskId, attemptId: attempt.id,
       subject: attempt.subject, book: question.book, test: question.test, unit: question.unit,
-      number: question.number, label: question.label, answer: question.answer,
+      number: question.number, label: question.label, ...(Object.hasOwn(question, 'answer') ? { answer: question.answer } : {}),
       correctAnswer: question.correctAnswer || '', cause: question.cause || '待分析', evidence: question.evidence || '',
       createdAt: completedAt, dueDate: addDays(completedAt, 1), stage: 0, failures: 1,
       lastReviewedAt: null, completed: false, history: [],
@@ -463,11 +518,13 @@ export function getAdaptation(state, task) {
   if (!attempts.length) return null;
   const total = attempts.reduce((sum, attempt) => sum + attempt.score.total, 0);
   const correct = attempts.reduce((sum, attempt) => sum + attempt.score.correct, 0);
-  const required = sourceDay === 7 ? correct / total < .7 : total === 40 && correct < 23;
+  const listeningCheckpoint = sourceDay === 14 && subject === 'listening';
+  const legacyListeningCheckpoint = listeningCheckpoint && total === 40;
+  const required = sourceDay === 7 ? correct / total < .7 : listeningCheckpoint && !legacyListeningCheckpoint ? total === 20 && correct / total < .7 : total === 40 && correct < 23;
   if (!required) return null;
-  const minutes = sourceDay === 7 ? 20 : 30;
+  const minutes = sourceDay === 7 || listeningCheckpoint && !legacyListeningCheckpoint ? 20 : 30;
   return {
-    minutes, reason: sourceDay === 7 ? `第7天${subject === 'reading' ? '阅读' : '听力'}专项正确率${Math.round(correct / total * 100)}%，低于70%。` : `第14天${subject === 'reading' ? '阅读' : '听力'}诊断${correct}/40，少于23题。`,
+    minutes, reason: sourceDay === 7 ? `第7天${subject === 'reading' ? '阅读' : '听力'}专项正确率${Math.round(correct / total * 100)}%，低于70%。` : legacyListeningCheckpoint ? `第14天旧版听力完整诊断${correct}/40，少于23题。` : listeningCheckpoint ? `第14天听力专项检查${correct}/20，正确率${Math.round(correct / total * 100)}%，低于70%。` : `第14天阅读诊断${correct}/40，少于23题。`,
     action: subject === 'reading' ? '重做基础填空、定位答案句并精读' : '复听基础片段、检查拼写与答案预测',
   };
 }
@@ -475,8 +532,7 @@ export function getAdaptation(state, task) {
 function subjectStats(state, subject) {
   const done = state.attempts.filter(attempt => attempt.subject === subject && attempt.completedAt && attempt.score);
   const full = done.filter(attempt => fullPaper(attempt));
-  const eligible40 = attempt => typeof attempt.score.raw40 === 'number' && Number.isFinite(attempt.score.raw40) && attempt.fresh && !attempt.redo && attempt.normalConditions !== false;
-  const raw40 = full.filter(eligible40).map(attempt => ({
+  const raw40 = full.filter(isFreshFullAttempt).map(attempt => ({
     id: attempt.id, day: attempt.day, correct: attempt.score.correct, total: 40,
     completedAt: attempt.completedAt, resources: copy(attempt.resources), kind: attempt.kind,
   }));
@@ -492,7 +548,7 @@ function subjectStats(state, subject) {
     practiceAccuracy: practiceTotal ? Math.round(practiceCorrect / practiceTotal * 1000) / 10 : null,
     practiceTotal, practiceCorrect, completedAttempts: done.length,
     redoAttempts: done.filter(attempt => attempt.redo).length,
-    retest40: full.filter(attempt => !eligible40(attempt)).map(attempt => ({ id: attempt.id, day: attempt.day, correct: attempt.score.correct, total: 40, completedAt: attempt.completedAt })),
+    retest40: full.filter(attempt => !isFreshFullAttempt(attempt)).map(attempt => ({ id: attempt.id, day: attempt.day, correct: attempt.score.correct, total: 40, completedAt: attempt.completedAt })),
     causes: Object.entries(causes).map(([cause, count]) => ({ cause, count })).sort((a, b) => b.count - a.count),
     latest: done.at(-1) || null,
     target: 30, targetGap: raw40.length ? Math.max(0, 30 - raw40.at(-1).correct) : null,
