@@ -393,6 +393,7 @@ document.addEventListener('submit',async e=>{
       const result=runtime.authMode==='signup'?await cloud.signUp(String(data.get('email')).trim(),String(data.get('password'))):await cloud.signIn(String(data.get('email')).trim(),String(data.get('password')));
       if(result?.confirmationRequired){msg.textContent='已发送确认邮件，请确认邮箱后回来登录。';return;}
       if(!runtime.user){msg.textContent='请确认邮箱或账号信息后重新登录。';return;}
+      if(result?.conflict){render();toast('本机与云端都有更新，请先选择继续使用哪份记录。');return;}
       if(result?.state&&!result.conflict){state=normalizeState(result.state);writeLocal();}
       else if(!result?.state)await cloud.save(clone(state));
       closeModal();render();toast('已登录，学习记录按账号保存。');

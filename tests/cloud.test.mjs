@@ -357,6 +357,36 @@ test('signup exposes confirmation requirement and unauthenticated saves remain l
   assert.equal(h.signUpRequests[0].options, undefined, 'Node has no browser redirect URL');
 });
 
+test('immediate signup returns the account snapshot and preserves a restored draft conflict', async () => {
+  const h = harness(null);
+  h.storage.set('ielts-coach-cloud-state-v1:A', JSON.stringify({
+    version: 1,
+    userId: 'A',
+    state: { value: 'local-draft' },
+    baseRevision: 1,
+    dirty: true,
+    savedAt: 'test',
+  }));
+  h.records.set('A', { state: { value: 'newer-remote' }, revision: 2, updated_at: 'test' });
+  h.client.auth.signUp = async () => {
+    h.user = { id: 'A', email: 'a@example.com' };
+    return { data: { session: { user: h.user } }, error: null };
+  };
+  const cloud = h.makeCloud();
+  await cloud.init();
+  const result = await cloud.signUp('a@example.com', 'unused-test-password');
+  assert.equal(result.confirmationRequired, false);
+  assert.equal(result.user.id, 'A');
+  assert.equal(result.conflict, true);
+  assert.equal(result.state.value, 'local-draft');
+  assert.equal(result.revision, 1);
+  assert.equal(h.events.at(-1).type, 'conflict');
+  assert.equal(h.events.at(-1).remote.value, 'newer-remote');
+  assert.equal(h.records.get('A').state.value, 'newer-remote');
+  assert.equal(h.cached('A').dirty, true);
+  assert.equal(h.rpcCount, 0);
+});
+
 test('signup email confirmation returns to this Pages site without its hash or query', async () => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'location');
   Object.defineProperty(globalThis, 'location', {

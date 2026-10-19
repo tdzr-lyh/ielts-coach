@@ -217,8 +217,11 @@ export class CloudSync {
       ...(redirectUrl ? { options: { emailRedirectTo: redirectUrl } } : {}),
     });
     if (error) throw error;
-    if (data.session?.user) await this._activate(data.session.user);
-    return { confirmationRequired: !data.session };
+    if (data.session?.user) {
+      const snapshot = await this._activate(data.session.user);
+      return { ...snapshot, confirmationRequired: false };
+    }
+    return { confirmationRequired: true };
   }
 
   async signIn(email, password) {

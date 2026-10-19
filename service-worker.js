@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "ielts-coach-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}v1`;
+const CACHE_NAME = `${CACHE_PREFIX}v2`;
 const SHELL = [
   "./",
   "./index.html",
