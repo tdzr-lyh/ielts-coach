@@ -9,10 +9,28 @@ const uid = prefix => `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.
 const instant = value => (value instanceof Date ? value : new Date(value ?? Date.now())).toISOString();
 const exposureKey = (subject, book, test) => `${subject}-${book}-${test}`;
 const TASK_ID = /^d([1-9]|[12]\d|30)-(reading|listening|vocabulary|reflection)$/;
+// Pre-claim releases stored general lesson drafts only in taskNotes. These
+// positions must remain reviews when a later curriculum moves a new task here.
+const LEGACY_LISTENING_REVIEWS = {
+  2: [1, 45, 25, 10, 10, 2, 15, 1, [[16, 1, 1, 1, 5]]],
+  6: [5, 45, 25, 10, 10, 2, 15, 1, [[16, 2, 1, 6, 10]]],
+  10: [9, 50, 30, 10, 10, 2, 20, 1, [[16, 1, 2, 15, 20]]],
+  15: [14, 60, 35, 10, 15, 2, 20, 1, [[16, 4, 1, 1, 10], [16, 4, 2, 11, 20]]],
+  19: [18, 60, 35, 10, 15, 3, 20, 2, [[16, 2, 4, 31, 40]]],
+  22: [21, 75, 45, 15, 15, 3, 20, 2, [[19, 2, null, 1, 40]]],
+  24: [21, 60, 30, 15, 15, 3, 20, 2, []],
+  26: [25, 60, 35, 10, 15, 3, 20, 2, [[16, 2, 2, 11, 20]]],
+  28: [27, 75, 45, 15, 15, 3, 20, 2, [[18, 1, null, 1, 40]]],
+};
 
 function validTaskId(value) {
   const match = typeof value === 'string' && value.match(TASK_ID);
   return !!match && DAYS.some(day => day.day === Number(match[1]));
+}
+
+function subjectTask(value) {
+  const match = typeof value === 'string' && value.match(/^d([1-9]|[12]\d|30)-(reading|listening)$/);
+  return match ? { day: Number(match[1]), subject: match[2] } : null;
 }
 
 function validDate(value) {
@@ -44,6 +62,37 @@ function validQuestion(value) {
     Number.isInteger(value.number) && value.number >= 1 && value.number <= 40;
 }
 
+function migrateLegacyListeningNotes(source, attempts, taskNotes, assignments) {
+  if (Object.hasOwn(source, 'claimedTasks') || attempts.some(attempt => attempt.taskSnapshot) ||
+      Object.values(assignments).some(assignment => assignment.taskSnapshot)) return;
+  for (const [day, description] of Object.entries(LEGACY_LISTENING_REVIEWS)) {
+    const taskId = `d${day}-listening`, note = taskNotes[taskId];
+    if (!note || !(note.text.trim() || note.checks.some(Boolean)) || source.completed?.[taskId] ||
+        attempts.some(attempt => attempt.taskId === taskId)) continue;
+    const [sourceDay, minutes, reviewMinutes, spellingMinutes, recallMinutes, segments, segmentSeconds, dictationSentences, locations] = description;
+    const original = attempts.find(attempt => attempt.day === sourceDay && attempt.subject === 'listening' && attempt.completedAt && !attempt.redo);
+    const kind = Number(day) === 24 ? 'review' : 'analysis';
+    const resources = kind === 'review' ? [] : original?.resources?.length ? copy(original.resources) : locations.map(([book, test, unit, from, to]) => ({
+      book, test, unit, from, to, verified: true,
+      sourceUrl: `https://engnovate.com/ielts-listening-tests/cambridge-ielts-${book}-academic-listening-test-${test}/`,
+    }));
+    const total = original?.questions?.length || resources.reduce((sum, resource) => sum + resource.to - resource.from + 1, 0);
+    const snapshot = {
+      id: taskId, day: Number(day), type: 'listening', subject: 'listening', kind,
+      title: kind === 'review' ? '继续旧版听力错题回忆' : `继续旧版第${sourceDay}组听力复盘 · ${total}题`,
+      methodId: kind === 'review' ? 'l-review' : 'l-analysis', resources, sourceDay, minutes,
+      ...(original && kind === 'analysis' ? { analysisOf: original.id } : {}),
+      ...(kind === 'review' ? { reviewItems: [], reviewLimit: 10 } : {}),
+      blockId: null, focus: '接着完成已经开始的复盘，保留原来的笔记与勾选。',
+      successCheck: '能重新听出代表片段，并说明上次出错的原因。',
+      listeningPlan: { newQuestions: 0, firstPassMinutes: 0, reviewMinutes, spellingMinutes, recallMinutes,
+        segments, segmentSeconds, dictationSentences,
+        instruction: '继续原来的复盘；只选规定数量的短片段，理解后跟读并听写关键句，不增加新题。' },
+    };
+    assignments[taskId] = { ...assignments[taskId], resources: copy(resources), taskSnapshot: snapshot };
+  }
+}
+
 /** Calendar dates use the learner's local timezone, never UTC truncation. */
 export function dateKey(date = new Date()) {
   if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
@@ -67,7 +116,7 @@ export function createState() {
   return {
     version: 1,
     profile: { startDate: dateKey(), baseline: 3.5, target: 6.5 },
-    completed: {}, drafts: {}, taskNotes: {}, assignments: {}, attempts: [], reviews: [], selectedTaskId: null,
+    completed: {}, claimedTasks: {}, drafts: {}, taskNotes: {}, assignments: {}, attempts: [], reviews: [], selectedTaskId: null,
     exposures: {}, vocabulary: [], reflections: {},
   };
 }
@@ -114,14 +163,25 @@ export function normalizeState(raw) {
   }]));
   const assignments = Object.fromEntries(Object.entries(record(source.assignments)).filter(([, value]) => value && typeof value === 'object')
     .map(([key, value]) => [key, { ...value, resources: cleanResources(value.resources) }]));
+  migrateLegacyListeningNotes(source, attempts, taskNotes, assignments);
+  const claimedTasks = Object.fromEntries(Object.entries(record(source.claimedTasks)).filter(([key]) => subjectTask(key))
+    .map(([key, value]) => [key, validInstant(value) ? value : validInstant(record(value).claimedAt) ? value.claimedAt : new Date().toISOString()]));
+  const retainClaim = (taskId, timestamp) => {
+    if (subjectTask(taskId) && !claimedTasks[taskId]) claimedTasks[taskId] = validInstant(timestamp) ? timestamp : new Date().toISOString();
+  };
+  for (const attempt of attempts) retainClaim(attempt.taskId, attempt.startedAt || attempt.completedAt);
+  for (const [taskId, timestamp] of Object.entries(record(source.completed))) if (timestamp) retainClaim(taskId, timestamp);
+  for (const taskId of Object.keys(record(source.drafts))) retainClaim(taskId);
+  for (const [taskId, note] of Object.entries(taskNotes)) if (note.text.trim() || note.checks.some(Boolean)) retainClaim(taskId);
   return {
     ...base, ...source, version: 1,
-    selectedTaskId: validTaskId(source.selectedTaskId) ? source.selectedTaskId : null,
+    selectedTaskId: subjectTask(source.selectedTaskId) ? source.selectedTaskId : null,
     profile: { ...base.profile, ...importedProfile,
       startDate: validDate(importedProfile.startDate) ? importedProfile.startDate : base.profile.startDate,
       baseline: scoreValue(importedProfile.baseline, 3.5), target: scoreValue(importedProfile.target, 6.5),
     },
     completed: copy(record(source.completed)),
+    claimedTasks,
     drafts: copy(record(source.drafts)),
     taskNotes, assignments,
     exposures: copy(record(source.exposures)),
@@ -131,7 +191,7 @@ export function normalizeState(raw) {
 
 export function calendarInfo(state, now = new Date()) {
   const elapsed = dateNumber(now) - dateNumber(state.profile.startDate);
-  const completedDays = DAYS.filter(day => ['reading', 'listening', 'vocabulary', 'reflection'].every(type => state.completed[`d${day.day}-${type}`])).length;
+  const completedDays = DAYS.filter(day => SUBJECTS.every(type => state.completed[`d${day.day}-${type}`])).length;
   return {
     elapsedDay: Math.max(0, elapsed + 1), remaining: Math.max(0, 30 - Math.max(0, elapsed)),
     deadline: addDays(state.profile.startDate, 29), completedDays,
@@ -140,6 +200,39 @@ export function calendarInfo(state, now = new Date()) {
 
 function sourceAttempt(state, day, subject) {
   return state.attempts.find(attempt => attempt.day === day && attempt.subject === subject && attempt.completedAt && !attempt.redo);
+}
+
+function savedAttempt(state, taskId) {
+  return state.attempts.find(attempt => attempt.taskId === taskId && !attempt.completedAt) ||
+    state.attempts.find(attempt => attempt.taskId === taskId);
+}
+
+/** Curriculum updates only change tasks which have not been started. */
+function restoreStartedTask(task, attempt, assignment) {
+  const snapshot = record(attempt?.taskSnapshot || assignment?.taskSnapshot);
+  if (!attempt && !Object.keys(snapshot).length && !(['diagnostic', 'mock'].includes(task.kind) && assignment?.resources?.length)) return task;
+  const restored = { ...copy(task), ...copy(snapshot) };
+  if (!attempt && assignment) {
+    if (Array.isArray(assignment.resources)) restored.resources = copy(assignment.resources);
+    if (Object.hasOwn(assignment, 'fresh')) restored.fresh = assignment.fresh;
+    if (Object.hasOwn(assignment, 'replacement')) restored.replacement = assignment.replacement;
+  }
+  if (attempt) {
+    const changed = attempt.kind !== task.kind || JSON.stringify(attempt.resources) !== JSON.stringify(task.resources) ||
+      attempt.minutes !== undefined && attempt.minutes !== task.minutes ||
+      !!attempt.methodId && attempt.methodId !== task.methodId;
+    // Older attempts predate full snapshots. Keep known metadata and avoid
+    // attaching a newly introduced lesson/analysis source to a different paper.
+    if (!Object.keys(snapshot).length && changed) {
+      for (const key of ['sourceDay', 'analysisOf', 'blockId', 'focus', 'successCheck', 'listeningPlan', 'instruction']) delete restored[key];
+    }
+    for (const key of ['kind', 'title', 'methodId', 'minutes', 'sourceDay', 'analysisOf', 'blockId', 'focus', 'successCheck', 'listeningPlan', 'instruction']) {
+      if (Object.hasOwn(attempt, key) && attempt[key] !== undefined) restored[key] = copy(attempt[key]);
+    }
+    restored.resources = copy(attempt.resources || []);
+  }
+  // Identity belongs to the task, never to an attempt or imported snapshot.
+  return { ...restored, id: task.id, day: task.day, type: task.type, subject: task.subject };
 }
 
 function selectedReviews(state, subject, limit, now = new Date()) {
@@ -151,7 +244,7 @@ export function tasksForDay(state, day) {
   if (!entry) return [];
   const subjectTasks = SUBJECTS.map(subject => {
     const source = entry[subject];
-    const task = {
+    let task = {
       ...copy(source), id: `d${entry.day}-${subject}`, day: entry.day, type: subject, subject,
       minutes: subject === 'listening' && Number.isFinite(source.minutes) && source.minutes > 0 ? source.minutes : entry.day <= 3 ? 75 : 90,
       resources: copy(source.resources || []),
@@ -161,10 +254,10 @@ export function tasksForDay(state, day) {
       if (original) {
         task.resources = copy(original.resources);
         task.analysisOf = original.id;
-        if (subject === 'listening' && task.kind === 'analysis') task.title = `复盘第${source.sourceDay}天听力 · 实际${original.questions.length}题`;
+        if (subject === 'listening' && task.kind === 'analysis') task.title = `复盘第${source.sourceDay}组听力 · 实际${original.questions.length}题`;
       }
     }
-    if (entry.day === 24 && task.kind === 'review') {
+    if (task.kind === 'review') {
       task.reviewItems = copy(selectedReviews(state, subject, subject === 'reading' ? 8 : 10));
       // Review tasks still need a usable book location even with no fixed paper.
       const grouped = new Map();
@@ -191,20 +284,11 @@ export function tasksForDay(state, day) {
       task.reviewLimit = subject === 'reading' ? 8 : 10;
       task.fallback = '错题不足时，复习已记录的同义替换、拼写和精听句，不添加新卷。';
     }
+    task = restoreStartedTask(task, savedAttempt(state, task.id), state.assignments[task.id]);
     task.adaptation = getAdaptation(state, task);
     return task;
   });
-  return [...subjectTasks, {
-    id: `d${entry.day}-vocabulary`, day: entry.day, type: 'vocabulary', kind: 'review',
-    title: '到期错题回忆与真题词汇', minutes: 50, reviewMinutes: 20, vocabularyMinutes: 30,
-    resources: [], methodId: 'vocabulary', maxNewWords: 20,
-    instruction: '先回忆到期错题20分钟，再整理当天真题中的词汇、拼写和同义替换30分钟；每天新增不超过20个。',
-  }, {
-    id: `d${entry.day}-reflection`, day: entry.day, type: 'reflection', kind: 'analysis',
-    title: '学习记录与每日小结', minutes: 10, reflectionMinutes: 10,
-    resources: [], methodId: 'reflection',
-    instruction: '用10分钟记录今天最主要的错因、仍不理解的句子和明天的改进动作。',
-  }];
+  return subjectTasks;
 }
 
 export function getCurrentTask(state) {
@@ -215,20 +299,58 @@ export function getCurrentTask(state) {
   return null;
 }
 
-/** Selection changes the visible task, never the earliest unfinished study day. */
-export function getSelectedTask(state) {
-  const recommended = getCurrentTask(state);
-  if (!recommended) return null;
-  return tasksForDay(state, recommended.day).find(task => task.id === state.selectedTaskId) || recommended;
+export function getClaimedTasks(state, { includeCompleted = false } = {}) {
+  return DAYS.flatMap(day => tasksForDay(state, day.day)).filter(task => state.claimedTasks?.[task.id] &&
+    (includeCompleted || !state.completed[task.id]));
 }
 
+/** Reading and listening each have their own ordered sequence of 30 tasks. */
+export function subjectProgress(state, subject) {
+  if (!SUBJECTS.includes(subject)) throw new Error('请选择阅读或听力。');
+  const tasks = DAYS.map(day => tasksForDay(state, day.day).find(task => task.type === subject));
+  const activeTask = tasks.find(task => state.claimedTasks?.[task.id] && !state.completed[task.id]) || null;
+  return {
+    subject, total: tasks.length, completed: tasks.filter(task => state.completed[task.id]).length,
+    claimed: tasks.filter(task => state.claimedTasks?.[task.id]).length, activeTask,
+    nextTask: activeTask ? null : tasks.find(task => !state.completed[task.id]) || null,
+  };
+}
+
+export function nextSubjectTask(state, subject) {
+  const progress = subjectProgress(state, subject);
+  return progress.activeTask || progress.nextTask;
+}
+
+export function claimTask(state, subjectOrTaskId) {
+  const identity = subjectTask(subjectOrTaskId);
+  const subject = identity?.subject || subjectOrTaskId;
+  const next = nextSubjectTask(state, subject);
+  if (identity && state.claimedTasks?.[subjectOrTaskId]) {
+    const existing = tasksForDay(state, identity.day).find(task => task.id === subjectOrTaskId);
+    state.selectedTaskId = existing.id;
+    return existing;
+  }
+  if (!next) throw new Error('这一科的30组任务已完成，可在学习记录中回看。');
+  if (identity && identity.day !== next.day) throw new Error('请先完成这一科已领取的任务，再按顺序领取下一组。');
+  const resolved = resolveTask(state, next);
+  const { adaptation, ...snapshot } = resolved;
+  state.assignments[next.id] = { ...state.assignments[next.id], resources: copy(resolved.resources || []), taskSnapshot: copy(snapshot) };
+  state.claimedTasks ||= {};
+  state.claimedTasks[next.id] ||= new Date().toISOString();
+  state.selectedTaskId = next.id;
+  return resolved;
+}
+
+export function getSelectedTask(state) {
+  const identity = subjectTask(state.selectedTaskId);
+  if (identity && state.claimedTasks?.[state.selectedTaskId]) return tasksForDay(state, identity.day).find(task => task.id === state.selectedTaskId);
+  return getClaimedTasks(state)[0] || null;
+}
+
+/** Selecting a next task also claims it, for compatibility with older clients. */
 export function selectTask(state, taskId) {
-  const current = getCurrentTask(state);
-  if (!current) throw new Error('本轮30天训练已完成，可在学习记录中回看练习。');
-  const selected = validTaskId(taskId) && tasksForDay(state, current.day).find(task => task.id === taskId);
-  if (!selected) throw new Error('只能切换当前训练日的任务，请先完成这一天的练习。');
-  state.selectedTaskId = selected.id;
-  return selected;
+  if (!subjectTask(taskId)) throw new Error('请选择有效的阅读或听力任务。');
+  return claimTask(state, taskId);
 }
 
 export function questionsFor(task) {
@@ -273,11 +395,11 @@ function bookedElsewhere(state, subject, book, test, taskId) {
 
 /** Resolves and remembers a replacement independently for reading/listening. */
 export function resolveTask(state, task) {
-  const result = copy(task);
+  const prior = savedAttempt(state, task.id);
+  const saved = state.assignments[task.id];
+  const result = restoreStartedTask(copy(task), prior, saved);
   if (!SUBJECTS.includes(task.type || task.subject)) return { ...result, fresh: false };
   const subject = task.type || task.subject;
-  const prior = state.attempts.find(attempt => attempt.taskId === task.id);
-  const saved = state.assignments[task.id];
   if (prior) return { ...result, resources: copy(prior.resources), fresh: prior.completedAt ? false : prior.fresh, replacement: saved?.replacement };
   if (!['diagnostic', 'mock'].includes(task.kind)) {
     return { ...result, fresh: (task.resources || []).length > 0 && !(task.resources || []).some(resource => hasExposure(state, subject, resource.book, resource.test)) };
@@ -297,7 +419,7 @@ export function resolveTask(state, task) {
   }
   const fresh = resources.length > 0 && resources.every(resource => !hasExposure(state, subject, resource.book, resource.test));
   if (!fresh) replacement = '备用卷均已见，本次作为复测；成绩不计入首次新卷诊断。';
-  state.assignments[task.id] = { resources: copy(resources), fresh, replacement: replacement || null };
+  state.assignments[task.id] = { ...saved, resources: copy(resources), fresh, replacement: replacement || null };
   return { ...result, resources, fresh, replacement };
 }
 
@@ -315,11 +437,13 @@ export function setExposure(state, subject, book, test, value) {
 }
 
 export function startAttempt(state, task, options = {}) {
+  state.claimedTasks ||= {};
+  if (subjectTask(task.id)) state.claimedTasks[task.id] ||= new Date().toISOString();
   const active = state.attempts.find(attempt => attempt.taskId === task.id && !attempt.completedAt);
   if (active) return active;
   const previous = [...state.attempts].reverse().find(attempt => attempt.taskId === task.id && attempt.completedAt);
   const redo = !!previous;
-  const resolved = previous ? { ...task, resources: copy(previous.resources), fresh: false } : resolveTask(state, task);
+  const resolved = previous ? { ...restoreStartedTask(task, previous, state.assignments[task.id]), fresh: false } : resolveTask(state, task);
   // A redo is the same paper/questions, even if the dynamic due queue has moved.
   const sourceQuestions = previous ? copy(previous.questions) : questionsFor(resolved);
   const startedAt = new Date().toISOString();
@@ -327,7 +451,7 @@ export function startAttempt(state, task, options = {}) {
   const recordingMode = options.recordingMode === 'answer-entry' ? 'answer-entry' : 'self-check';
   const attempt = {
     id: uid('attempt'), taskId: task.id, subject: task.type || task.subject, day: task.day,
-    kind: previous?.kind || task.kind, title: previous?.title || task.title || '', methodId: previous?.methodId || task.methodId || '', minutes: previous?.minutes ?? task.minutes,
+    kind: resolved.kind, title: resolved.title || '', methodId: resolved.methodId || '', minutes: resolved.minutes,
     resources: copy(resolved.resources || []),
     questions: sourceQuestions.map(question => {
       const { answer, correctAnswer, ...position } = question;
@@ -338,6 +462,10 @@ export function startAttempt(state, task, options = {}) {
     durationSource: recordingMode === 'self-check' ? 'external' : 'legacy-timer',
     fresh: !!resolved.fresh && !redo, redo,
   };
+  const { adaptation, ...snapshot } = resolved;
+  attempt.taskSnapshot = copy(snapshot);
+  state.assignments[task.id] = { ...state.assignments[task.id], resources: copy(attempt.resources),
+    fresh: attempt.fresh, taskSnapshot: copy(snapshot) };
   if (recordingMode === 'answer-entry' && attempt.subject === 'reading' && ['diagnostic', 'mock'].includes(attempt.kind) && attempt.questions.length === 40) {
     attempt.deadline = new Date(new Date(startedAt).getTime() + 3600000).toISOString();
   }
@@ -467,9 +595,11 @@ export function finishAttempt(state, attemptId) {
 export function completeTask(state, taskId) {
   if (!validTaskId(taskId)) throw new Error('训练任务无效。');
   if (!state.completed[taskId]) state.completed[taskId] = new Date().toISOString();
-  const current = getCurrentTask(state);
-  if (!current) state.selectedTaskId = null;
-  else if (!tasksForDay(state, current.day).some(task => task.id === state.selectedTaskId)) state.selectedTaskId = current.id;
+  if (subjectTask(taskId)) {
+    state.claimedTasks ||= {};
+    state.claimedTasks[taskId] ||= state.completed[taskId];
+  }
+  if (!state.claimedTasks?.[state.selectedTaskId]) state.selectedTaskId = getClaimedTasks(state)[0]?.id || null;
   return state.completed[taskId];
 }
 
@@ -514,18 +644,33 @@ export function getAdaptation(state, task) {
   if (!SUBJECTS.includes(subject)) return null;
   const sourceDay = task.day >= 8 && task.day <= 10 ? 7 : task.day >= 15 && task.day <= 17 ? 14 : null;
   if (!sourceDay) return null;
-  const attempts = state.attempts.filter(attempt => attempt.day === sourceDay && attempt.subject === subject && attempt.completedAt && !attempt.redo && attempt.score?.total > 0);
+  const completed = state.attempts.filter(attempt => attempt.subject === subject && attempt.completedAt && !attempt.redo && attempt.score?.total > 0 && !['analysis', 'wrapup'].includes(attempt.kind));
+  let attempts = completed.filter(attempt => attempt.day === sourceDay);
+  // The current single-choice block uses two separate practice days. A checked
+  // review checklist, a partial block or an older unrelated lesson is no score.
+  const legacyCheckpoint = subject === 'listening' && sourceDay === 14 ? attempts.find(attempt => [20, 40].includes(attempt.score.total)) : null;
+  const singleChoiceCheckpoint = subject === 'listening' && sourceDay === 14 && !legacyCheckpoint;
+  if (singleChoiceCheckpoint) {
+    attempts = [11, 13].map(day => {
+      const expected = questionsFor({ ...DAYS[day - 1].listening, type: 'listening' }).map(question => question.id).sort();
+      return completed.find(attempt => attempt.day === day && attempt.kind === 'practice' &&
+        attempt.score.total === expected.length && attempt.questions?.length === expected.length &&
+        JSON.stringify(attempt.questions.map(question => question.id).sort()) === JSON.stringify(expected));
+    });
+    if (attempts.some(attempt => !attempt) || attempts.reduce((sum, attempt) => sum + attempt.score.total, 0) !== 10) return null;
+  } else if (legacyCheckpoint) attempts = [legacyCheckpoint];
   if (!attempts.length) return null;
   const total = attempts.reduce((sum, attempt) => sum + attempt.score.total, 0);
   const correct = attempts.reduce((sum, attempt) => sum + attempt.score.correct, 0);
   const listeningCheckpoint = sourceDay === 14 && subject === 'listening';
   const legacyListeningCheckpoint = listeningCheckpoint && total === 40;
-  const required = sourceDay === 7 ? correct / total < .7 : listeningCheckpoint && !legacyListeningCheckpoint ? total === 20 && correct / total < .7 : total === 40 && correct < 23;
+  const required = sourceDay === 7 || singleChoiceCheckpoint ? correct / total < .7 : listeningCheckpoint && !legacyListeningCheckpoint ? total === 20 && correct / total < .7 : total === 40 && correct < 23;
   if (!required) return null;
   const minutes = sourceDay === 7 || listeningCheckpoint && !legacyListeningCheckpoint ? 20 : 30;
   return {
-    minutes, reason: sourceDay === 7 ? `第7天${subject === 'reading' ? '阅读' : '听力'}专项正确率${Math.round(correct / total * 100)}%，低于70%。` : legacyListeningCheckpoint ? `第14天旧版听力完整诊断${correct}/40，少于23题。` : listeningCheckpoint ? `第14天听力专项检查${correct}/20，正确率${Math.round(correct / total * 100)}%，低于70%。` : `第14天阅读诊断${correct}/40，少于23题。`,
-    action: subject === 'reading' ? '重做基础填空、定位答案句并精读' : '复听基础片段、检查拼写与答案预测',
+    minutes, replacement: true, additionalMinutes: 0,
+    reason: sourceDay === 7 ? `第7组${subject === 'reading' ? '阅读' : '听力'}专项正确率${Math.round(correct / total * 100)}%，低于70%。` : singleChoiceCheckpoint ? `第11、13组单选共${correct}/10，正确率${Math.round(correct / total * 100)}%，低于70%。` : legacyListeningCheckpoint ? `第14组旧版听力完整诊断${correct}/40，少于23题。` : listeningCheckpoint ? `第14组旧版听力专项检查${correct}/20，正确率${Math.round(correct / total * 100)}%，低于70%。` : `第14组阅读诊断${correct}/40，少于23题。`,
+    action: subject === 'reading' ? '重做基础填空、定位答案句并精读' : singleChoiceCheckpoint ? '复听已练单选片段，比较选项差别并找出干扰项证据' : '复听基础片段、检查拼写与答案预测',
   };
 }
 
@@ -556,18 +701,17 @@ function subjectStats(state, subject) {
 }
 
 export function getStats(state) {
-  const calendar = calendarInfo(state);
-  const dates = new Set(Object.values(state.completed).map(value => dateKey(value)));
+  const subjectCompletions = Object.entries(state.completed).filter(([taskId, timestamp]) => subjectTask(taskId) && timestamp);
+  const dates = new Set(subjectCompletions.map(([, value]) => dateKey(value)));
   let day = dateKey();
   if (!dates.has(day)) day = addDays(day, -1);
   let streak = 0;
   while (dates.has(day)) { streak++; day = addDays(day, -1); }
   return {
-    completedDays: calendar.completedDays,
-    completedTasks: Object.keys(state.completed).filter(key => /^d(?:[1-9]|[12]\d|30)-(reading|listening|vocabulary|reflection)$/.test(key)).length,
-    totalTasks: DAYS.length * 4, reading: subjectStats(state, 'reading'), listening: subjectStats(state, 'listening'),
+    completedTasks: subjectCompletions.length,
+    totalTasks: DAYS.length * SUBJECTS.length, reading: subjectStats(state, 'reading'), listening: subjectStats(state, 'listening'),
     dueCount: dueReviews(state).length, totalAttempts: state.attempts.filter(attempt => attempt.completedAt).length,
-    totalVocabulary: state.vocabulary.length, streak,
+    streak,
     elapsedSeconds: state.attempts.reduce((sum, attempt) => sum + (Number(attempt.elapsedSeconds) || 0), 0),
   };
 }

@@ -1,18 +1,19 @@
-import { DAYS, METHODS, PHASES } from './curriculum.js';
+import { DAYS, METHODS, LISTENING_BLOCKS, LISTENING_REFERENCES } from './curriculum.js';
 import {
-  createState, normalizeState, dateKey, calendarInfo, tasksForDay, getCurrentTask, getSelectedTask, selectTask,
+  createState, normalizeState, dateKey, tasksForDay, getSelectedTask, selectTask,
   questionsFor, resolveTask, startAttempt, beginSelfCheck, setExternalDuration, finishAttempt, completeTask,
   dueReviews, recordReview, getAdaptation, isFreshFullAttempt, setExposure,
+  subjectProgress, claimTask, getClaimedTasks,
 } from './model.js';
 import { CloudSync } from './cloud.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clone = v => JSON.parse(JSON.stringify(v));
-const subjectName = s => s === 'reading' ? '阅读' : s === 'listening' ? '听力' : s === 'vocabulary' ? '词汇与回忆' : '学习小结';
+const subjectName = s => s === 'reading' ? '阅读' : '听力';
 const kindName = k => ({practice:'专项练习',diagnostic:'阶段诊断',mock:'完整模考',analysis:'精读 / 精听',review:'错题重练',wrapup:'考前巩固'}[k] || '学习任务');
 const PREFIX = 'ielts-coach-state-v1:';
-const runtime = { user:null, view:'today', methodFilter:'all', reviewFilter:'due', focusAttempt:null, saveTimer:null, toastTimer:null, authMode:'login', conflict:null };
+const runtime = { user:null, view:'today', methodFilter:'all', reviewFilter:'due', routeSubject:'listening', focusAttempt:null, saveTimer:null, toastTimer:null, authMode:'login', conflict:null };
 let state = readLocal('guest');
 
 function readLocal(id) {
@@ -62,12 +63,11 @@ const cloud = new CloudSync({
     openModal(`<h2>另一台设备也更新了记录</h2><p>本机草稿已保留。先选择要继续使用的版本，避免相互覆盖。</p><div class="banner">本机：${countSummary(conflict.local)}<br>云端：${countSummary(conflict.remote)}</div><div class="button-row"><button class="button" data-action="conflict-remote">使用云端版本</button><button class="button secondary" data-action="conflict-local">保留并上传本机版本</button></div><button class="text-button" data-action="export" style="margin-top:18px">先导出本机备份</button>`);
   },
 });
-function countSummary(s) { return `${Object.keys(s?.completed || {}).length}项完成，${(s?.attempts || []).filter(a => a.completedAt).length}组练习`; }
+function countSummary(s) { return `${Object.keys(s?.completed || {}).filter(id=>/^d\d+-(reading|listening)$/.test(id)).length}组任务完成，${(s?.attempts || []).filter(a => a.completedAt).length}次成绩记录`; }
 
 function fmtTime(seconds) {
   const n = Math.max(0, Math.floor(seconds || 0)); return `${String(Math.floor(n / 60)).padStart(2,'0')}:${String(n % 60).padStart(2,'0')}`;
 }
-function dayDone(day) { return tasksForDay(state, day).every(t => state.completed[t.id]); }
 function completedAttempt(taskId) { return [...state.attempts].reverse().find(a => a.taskId === taskId && a.completedAt); }
 function activeAttempt(task) {
   if (runtime.focusAttempt) {
@@ -83,10 +83,8 @@ function guideHtml(method, short = false) {
   const steps = method?.steps || ['先准备教材和纸笔。','完成练习后记录结果，并写下最需要解决的问题。'];
   return `<ol class="step-guide">${steps.slice(0, short ? 4 : steps.length).map(s => `<li><span>${esc(s)}</span></li>`).join('')}</ol>`;
 }
-function phaseFor(day) { return PHASES.find(p => day >= p.from && day <= p.to) || PHASES[0]; }
-function head(title, description, overline = 'TODAY’S PRACTICE', showDeadline = true) {
-  const cal = calendarInfo(state);
-  return `<div class="page-heading"><div><div class="overline">${overline}</div><h1>${title}</h1><p>${description}</p></div>${showDeadline ? `<div class="deadline-note">距计划结束<strong>${Math.max(0, cal.remaining)}</strong>天<span>按自己的进度，认真完成。</span></div>` : ''}</div>`;
+function head(title, description, overline = 'YOUR PRACTICE DESK') {
+  return `<div class="page-heading"><div><div class="overline">${overline}</div><h1>${title}</h1><p>${description}</p></div></div>`;
 }
 function render() {
   let recovered = false;
@@ -96,7 +94,7 @@ function render() {
   if (recovered) persist();
   const route = location.hash.slice(1).split('?')[0];
   runtime.view = ['today','roadmap','methods','reviews','records'].includes(route) ? route : 'today';
-  const labels = {today:'今日训练',roadmap:'30天路线',methods:'训练方法',reviews:'错题复习',records:'学习记录'};
+  const labels = {today:'任务大厅',roadmap:'训练路线',methods:'训练方法',reviews:'错题复习',records:'学习记录'};
   $('#breadcrumb').innerHTML = `我的学习空间 <span>/</span> ${labels[runtime.view]}`;
   $('#todayDate').textContent = new Intl.DateTimeFormat('zh-CN',{month:'long',day:'numeric',weekday:'long'}).format(new Date());
   document.querySelectorAll('[data-nav]').forEach(a => a.classList.toggle('active', a.dataset.nav === runtime.view));
@@ -106,36 +104,58 @@ function render() {
   $('#main').innerHTML = ({today:renderToday,roadmap:renderRoadmap,methods:renderMethods,reviews:renderReviews,records:renderRecords}[runtime.view])();
 }
 function renderToday() {
-  const pending = getCurrentTask(state), selected = getSelectedTask(state);
+  const selected = getSelectedTask(state);
   const focus = runtime.focusAttempt ? state.attempts.find(a=>a.id===runtime.focusAttempt) : selected ? activeAttempt(selected) || (state.completed[selected.id] ? completedAttempt(selected.id) : null) : null;
   const original = focus ? tasksForDay(state,focus.day).find(t=>t.id===focus.taskId) : selected;
-  const task = original ? (focus ? original : resolveTask(state,original)) : null;
-  if (!task) return `${head('30天的练习，已经留下了答案。','回看真实成绩与错题，带着清晰的方法上考场。','YOUR NEXT CHAPTER')}<div class="paper empty-state"><span>✓</span><h2>本轮训练已完成</h2><p>练习完成不等于考试保证。最后几套全新试卷的表现，是下一步最有价值的参考。</p><a class="button" href="#records">查看听读成绩</a></div>`;
-  const cal = calendarInfo(state), method = METHODS[task.methodId];
-  const actualTask = focus ? { ...task, ...focus, id:task.id, type:focus.subject, title:focus.title || task.title, resources:focus.resources } : task;
-  const day = actualTask.day, trainingDay = pending?.day || day;
-  const heading = day === 1 && task.type === 'reading' && !focus ? '今天，先把这6道题做明白。' : focus?.completedAt ? '每一次复盘，都算数。' : `第${day}天，一步一步往前走。`;
-  const overdue = cal.elapsedDay > day && cal.remaining > 0 ? `<div class="banner warn">日历已到第${cal.elapsedDay}天，当前继续第${day}天的未完任务。先接着练，避免把几天作业堆在一起。</div>` : cal.remaining <= 0 ? `<div class="banner warn">30天日历已结束。未完成的任务仍可接着练；根据目前成绩决定下一轮重点。</div>` : '';
-  return `${head(heading,'打开你的剑桥真题，阅读、听力按你喜欢的顺序练。')}${overdue}<div class="dashboard"><div>${renderSubjectPicker(trainingDay,actualTask)}${dueReviews(state).length ? `<div class="banner">有 <b>${dueReviews(state).length}</b> 道错题到期了。先回忆，再看依据。<a class="text-button" href="#reviews">去复习 →</a></div>` : ''}<article class="paper lesson"><header class="lesson-top"><div class="lesson-id"><span class="lesson-day">${String(day).padStart(2,'0')}</span><div><small>DAY ${String(day).padStart(2,'0')} / 30</small><strong>${esc(phaseFor(day)?.title || '基础训练')}</strong></div></div><span class="pill">${subjectName(actualTask.type)} · ${actualTask.minutes || task.minutes} min</span></header>${focus ? renderAttempt(actualTask,focus) : ['practice','diagnostic','mock','review'].includes(task.kind) && questionsFor(task).length ? renderTaskIntro(task,method) : renderGeneral(task)}</article></div>${renderAside(trainingDay, actualTask)}</div>`;
+  const task = original ? resolveTask(state,original) : null;
+  const actual = task && focus ? {...task,...focus,id:task.id,type:focus.subject,resources:focus.resources} : task;
+  const welcome = head('领取一组任务，按自己的节奏练。','阅读、听力各自推进。一次专注一组，做完再领；随时暂停，下次接着练。');
+  const cards = renderSubjectPicker(actual);
+  if (!actual) {
+    const done = ['reading','listening'].reduce((sum,subject)=>sum+subjectProgress(state,subject).completed,0);
+    return `${welcome}${cards}<section class="paper claim-empty"><span class="pill">按题型循序练习</span><h2>${done===60?'本轮听读任务已完成':done?'休息一下，再决定领哪一组':'先选一科，领取你的第一组任务'}</h2><p>${done===60?'回看完整新卷表现和反复错题，判断下一步需要补强的能力。':'任务包含教材位置、训练方法、建议用时和完成要求。你在自己的做题网站作答，回来只标对错。'}</p><p>每科30组，30天是冲刺参考。领取多少由你安排，网站不按日历堆作业。</p><a class="text-button" href="${done===60?'#records':'#roadmap'}">${done===60?'查看学习记录':'看看训练路线'} →</a></section>`;
+  }
+  const method = METHODS[actual.methodId];
+  return `${welcome}${cards}<div class="dashboard"><article class="paper lesson"><header class="lesson-top"><div class="lesson-id"><span class="lesson-day">${String(actual.day).padStart(2,'0')}</span><div><small>${subjectName(actual.type)} · 第${actual.day} / 30组</small><strong>${esc(listeningBlock(actual)?.title || '循序训练')}</strong></div></div><span class="pill">建议 ${actual.minutes} min</span></header>${focus ? renderAttempt(actual,focus) : ['practice','diagnostic','mock','review'].includes(actual.kind) && questionsFor(actual).length ? renderTaskIntro(actual,method) : renderGeneral(actual)}</article>${renderAside(actual)}</div>`;
 }
 function taskStatus(task) {
   if (state.completed[task.id]) return '已完成 · 可回看';
   const attempt = [...state.attempts].reverse().find(a=>a.taskId===task.id && !a.completedAt);
   return attempt ? '继续标对错' : state.taskNotes[task.id]?.text ? '继续复盘' : '未开始';
 }
-function renderSubjectPicker(day, currentTask) {
-  const tasks = tasksForDay(state,day).filter(t=>['reading','listening'].includes(t.type));
-  return `<section class="subject-picker" aria-label="选择今天的训练科目"><div class="picker-caption">第${day}天 · 先练哪一科，由你决定</div><div class="subject-options">${tasks.map(t=>`<button class="subject-option ${t.id===currentTask.id?'active':''}" data-action="select-task" data-task="${t.id}" aria-pressed="${t.id===currentTask.id}"><span class="subject-option-name">${subjectName(t.type)}<small>${t.minutes} min</small></span><span class="subject-option-status ${state.completed[t.id]?'done':''}">${taskStatus(t)} <span aria-hidden="true">↗</span></span></button>`).join('')}</div><p>在你习惯的网站做题，回来只标对错；两科进度分别保存。</p></section>`;
+function renderSubjectPicker(currentTask) {
+  return `<section class="claim-grid" aria-label="领取阅读或听力任务">${['reading','listening'].map(subject=>{
+    const progress = subjectProgress(state,subject), next = progress.activeTask || progress.nextTask;
+    const isActive = next && next.id === currentTask?.id;
+    return `<article class="paper claim-card ${isActive?'is-selected':''}"><div class="side-title"><h2>${subjectName(subject)}</h2><small>${progress.completed} / 30 组完成</small></div><div class="claim-progress" role="progressbar" aria-label="${subjectName(subject)}任务进度" aria-valuenow="${progress.completed}" aria-valuemin="0" aria-valuemax="30"><span style="width:${progress.completed/30*100}%"></span></div>${next?`<div class="claim-status">${progress.activeTask?'已领取 · 进度已保存':'下一组可领取'} · 第${next.day}组</div><h3>${esc(next.title)}</h3><p>${kindName(next.kind)} · 建议${next.minutes}分钟</p><button class="button ${isActive?'secondary':''}" data-action="${progress.activeTask?'select-task':'claim-task'}" data-task="${esc(next.id)}">${progress.activeTask?'继续这组任务':'领取'+subjectName(subject)+'任务'} →</button>`:'<h3>本轮任务已完成</h3><p>可在学习记录回看与重做。</p><a class="button secondary" href="#records">查看学习记录 →</a>'}</article>`;
+  }).join('')}</section>`;
 }
-function renderAside(day, currentTask) {
-  const tasks = tasksForDay(state,day), sum = tasks.reduce((n,t)=>n+t.minutes,0), done = tasks.filter(t=>state.completed[t.id]).length;
-  return `<aside class="right-column"><section class="paper side-panel"><div class="side-title"><h3>今天的训练单</h3><small>${done} / 4 完成</small></div><p class="track-hint">点击选择，四项顺序自由安排。</p><ul class="daily-track">${tasks.map(t=>`<li class="${state.completed[t.id]?'done':''} ${t.id===currentTask.id?'current':''}"><button data-action="select-task" data-task="${t.id}" aria-pressed="${t.id===currentTask.id}"><span class="track-number">${state.completed[t.id]?'✓':t.type==='reading'?'阅':t.type==='listening'?'听':t.type==='vocabulary'?'词':'记'}</span><span>${subjectName(t.type)}</span><span class="track-minutes">${t.minutes} min</span></button></li>`).join('')}</ul></section><section class="paper side-panel"><div class="side-title"><h3>专注，也留出休息</h3></div><div class="budget"><strong>${sum}</strong><span>分钟 · 今日建议净学习</span></div><div class="budget-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></div><p class="offline-note">阅读${tasks[0].minutes}分钟，听力${tasks[1].minutes}分钟，回忆与词汇50分钟，小结10分钟。 每45–60分钟休息10分钟。</p></section><section class="hint-panel"><h3>老师的一句提醒</h3><p>${currentTask.type==='listening'?'先把Part 1的预测、定位和拼写练稳。精听只挑当天规定的短片段，听懂后跟读，不整篇听写。':'先看题目要求，再回原文找依据。认识每个词并不是做对题的前提，读懂答案所在的句子更重要。'}</p><a class="text-button" href="#methods">看看具体怎么练 →</a></section><section class="paper side-panel overview-panel"><div class="side-title"><h3>30天，一天一格</h3><a class="text-button" href="#roadmap">全览 ↗</a></div><div class="day-strip">${DAYS.map(d=>`<button class="day-dot ${dayDone(d.day)?'complete':d.day===day?'active':''}" data-action="preview-day" data-day="${d.day}" aria-label="查看第${d.day}天">${d.day}</button>`).join('')}</div><div class="overview-line"><span>已完成 ${DAYS.filter(d=>dayDone(d.day)).length} 天</span><span>目标：听读 6.5</span></div></section></aside>`;
+function renderAside(currentTask) {
+  const block = listeningBlock(currentTask);
+  return `<aside class="right-column"><section class="paper side-panel"><div class="side-title"><h3>这组怎么安排</h3></div><div class="budget"><strong>${currentTask.minutes}</strong><span>分钟 · 本组建议用时</span></div><p class="offline-note">可以分次完成，刷新后继续。每专注45–60分钟休息一下；本组结束后，再决定是否领取下一组。</p></section><section class="hint-panel"><h3>老师的一句提醒</h3><p>${esc(currentTask.type==='listening' ? currentTask.focus || '先预测，原速听一次，再针对错题看文本查漏。合上文本重新听到证据，比记住答案更重要。' : '先读题目要求，找到原文依据。把答案所在的句子读懂，再检查题型规则。')}</p>${block?`<p class="offline-note">${esc(block.goal)}</p>`:''}<a class="text-button" href="#methods">看看具体怎么练 →</a></section>${dueReviews(state).length?`<section class="paper side-panel"><h3>${dueReviews(state).length}道错题到期</h3><p class="offline-note">有空先回忆依据，再核对文本。它们不会阻止你领取新任务。</p><a class="text-button" href="#reviews">打开错题复习 →</a></section>`:''}<section class="paper side-panel"><h3>两科独立，不赶日历</h3><p class="offline-note">无需等另一科完成。这组保存后返回任务大厅，自行领取下一组；复盘也算一组正式任务。</p><a class="text-button" href="#roadmap">查看训练路线 ↗</a></section></aside>`;
+}
+function listeningBlock(task) {
+  return task.type === 'listening' && task.blockId ? LISTENING_BLOCKS.find(block=>block.id===task.blockId) : null;
+}
+function renderListeningRoute() {
+  return `<section class="paper listening-route"><div class="side-title"><h2>听力，按题型一块一块练</h2><a class="text-button" href="#methods">训练方法 ↗</a></div><p class="lead">同类题连续学，用复盘任务消化，再迁移到新题；主要题型练过以后再做整套。</p><ol class="listening-blocks">${LISTENING_BLOCKS.map(block=>`<li><small>第${block.from}–${block.to}组</small><strong>${esc(block.title)}</strong><p>${esc(block.goal)}</p></li>`).join('')}</ol><p class="offline-note">每组建议45–75分钟。正确率70%是本站安排补强的教学参考；专项与熟题成绩不换算雅思分数。</p></section>`;
+}
+function renderListeningReferences() {
+  return `<details class="paper listening-references"><summary>这套听力练法参考了什么？</summary><p>预读预测、按意思识别改写、检查拼写与字数、利用听力文本查漏，参考以下官方备考资料。训练时长、题型顺序、短精听数量及70%补强线，是按3.5基础制定的本站教学安排。</p><ul>${LISTENING_REFERENCES.map(source=>`<li><a href="${esc(source.url)}" target="_blank" rel="noopener noreferrer">${esc(source.title)} ↗</a><p>${esc(source.support)}</p></li>`).join('')}</ul><p class="offline-note">资料核对：2026年10月20日。看文本用于复盘；首次做题仍按原速一次独立完成。</p></details>`;
 }
 function renderListeningPlan(task) {
   const plan = task.type==='listening' ? task.listeningPlan : null;
   if (!plan || (task.questions && plan.newQuestions>0 && task.questions.length!==plan.newQuestions)) return '';
+  if (plan.firstPassMinutes + plan.reviewMinutes + plan.spellingMinutes + plan.recallMinutes !== task.minutes) return '';
+  const block = listeningBlock(task), adapt = getAdaptation(state,task);
   const allocations = [['做题 / 起步回顾',plan.firstPassMinutes],['精听 / 分析',plan.reviewMinutes],['拼写与搭配',plan.spellingMinutes],['旧题回忆',plan.recallMinutes]];
-  return `<section class="listening-plan"><div class="side-title"><h3>${plan.newQuestions ? `本次新题 ${plan.newQuestions} 道` : '今天复习，消化已经做过的题'}</h3><small>建议 ${task.minutes} 分钟</small></div><p>${esc(plan.instruction)}</p><div class="practice-budget">${allocations.map(([label,minutes])=>`<div><strong>${minutes}<small> min</small></strong><span>${label}</span></div>`).join('')}</div><p class="plan-limit">${plan.segments ? `精听只挑 ${plan.segments} 段，每段不超过 ${plan.segmentSeconds} 秒；每段盲听最多3次，听写 ${plan.dictationSentences} 句。` : '整套当天只归类错因，深度精听安排在复盘日。'}</p></section>`;
+  if (adapt) {
+    let remaining = adapt.minutes;
+    for (const i of [1,3,2]) { const taken = Math.min(remaining,allocations[i][1]); allocations[i][1] -= taken; remaining -= taken; }
+    allocations.unshift(['先补基础',adapt.minutes-remaining]);
+  }
+  const segments = plan.segments;
+  return `<section class="listening-plan">${block?`<div class="block-caption">第${block.from}–${block.to}组 · ${esc(block.title)}</div>`:''}<div class="side-title"><h3>${plan.newQuestions ? `本次题组 ${plan.newQuestions} 道` : '本组复盘，消化已经做过的题'}</h3><small>建议 ${task.minutes} 分钟</small></div>${task.focus?`<p class="daily-focus"><b>本组只抓一个重点：</b>${esc(task.focus)}</p>`:''}<p>${esc(plan.instruction)}</p><div class="practice-budget ${adapt?'has-adaptation':''}">${allocations.map(([label,minutes])=>`<div><strong>${minutes}<small> min</small></strong><span>${label}</span></div>`).join('')}</div>${adapt?`<p class="plan-limit">补强已从精听与回忆时间中调配，总时长仍为${task.minutes}分钟；本组只保留最关键的片段，按剩余时间收束。</p>`:''}<p class="plan-limit">${segments ? `精听最多 ${segments} 段，每段不超过 ${plan.segmentSeconds} 秒；每段盲听最多3次，再看文本、跟读、合上文本原速回听。短句听写最多 ${plan.dictationSentences} 句。` : '整套任务只归类错因，深度精听留给下一组复盘。'}</p>${task.successCheck?`<p class="success-check"><b>做到这些就结束：</b>${esc(task.successCheck)}</p>`:''}${block?`<details class="block-check"><summary>这一题型练到什么程度？</summary><p>${esc(block.readyWhen)}</p></details>`:''}</section>`;
 }
 function renderTaskIntro(task,method) {
   const count = questionsFor(task).length, adapt = getAdaptation(state,task);
@@ -165,51 +185,49 @@ function attemptDuration(a) { return a.recordingMode==='self-check' && !a.durati
 function renderResult(task,a) {
   const correct = a.score?.correct ?? a.correctCount ?? a.questions.filter(q=>q.correct).length;
   const total = a.questions.length, wrong = total-correct;
-  return `<div class="lesson-body"><div class="subject-label">${subjectName(a.subject)} · 本组已完成</div><h2>做完，也弄懂一点。</h2><div class="result-score">${correct}<small> / ${total}</small></div><p class="lead">${a.redo?'重做成绩':isFreshFullAttempt(a)?'全新完整卷 · 首次成绩':'专项 / 已见内容练习'} · ${attemptDuration(a)}</p><div class="result-note">${wrong?`${wrong}道错题已加入复习，安排在次日、3天后和7天后回忆。`:'这组全部正确。下次继续用原文或音频证据验证自己的判断。'}${total<40?'<br>专项成绩用于观察题型进步，不换算雅思分数。':''}${total===40?'<br>训练争取稳定30/40。正式分数依试卷换算，不作提分保证。':''}</div>${a.reviewScheduleNote?`<p class="lead">${esc(a.reviewScheduleNote)}</p>`:''}${a.note?`<div class="section-caption">这次记住的事</div><p class="lead">${esc(a.note)}</p>`:''}<details class="details-block"><summary>回看本组对错与复盘</summary>${a.questions.map(q=>`<div class="review-answer"><b>${esc(q.label)} · ${q.correct?'✓':'×'}</b>${q.answer?`<br><span lang="en">原作答：${esc(q.answer)}</span>`:''}${!q.correct?`<br>${esc(q.cause || '待分析')}<br>${esc(q.evidence || '回到对应题目的解析或音频复习即可。')}`:''}</div>`).join('')}</details></div><footer class="lesson-footer"><a class="text-button" href="#records">查看学习记录 ↗</a><div class="button-row" style="margin:0"><button class="button secondary small" data-action="redo-attempt" data-id="${esc(a.id)}">重做这一组</button><button class="button" data-action="next">继续下一项 →</button></div></footer>`;
+  return `<div class="lesson-body"><div class="subject-label">${subjectName(a.subject)} · 本组已完成</div><h2>做完，也弄懂一点。</h2><div class="result-score">${correct}<small> / ${total}</small></div><p class="lead">${a.redo?'重做成绩':isFreshFullAttempt(a)?'全新完整卷 · 首次成绩':'专项 / 已见内容练习'} · ${attemptDuration(a)}</p><div class="result-note">${wrong?`${wrong}道错题已加入复习，安排在次日、3天后和7天后回忆。`:'这组全部正确。下次继续用原文或音频证据验证自己的判断。'}${total<40?'<br>专项成绩用于观察题型进步，不换算雅思分数。':''}${total===40?'<br>训练争取稳定30/40。正式分数依试卷换算，不作提分保证。':''}</div>${a.reviewScheduleNote?`<p class="lead">${esc(a.reviewScheduleNote)}</p>`:''}${a.note?`<div class="section-caption">这次记住的事</div><p class="lead">${esc(a.note)}</p>`:''}<details class="details-block"><summary>回看本组对错与复盘</summary>${a.questions.map(q=>`<div class="review-answer"><b>${esc(q.label)} · ${q.correct?'✓':'×'}</b>${q.answer?`<br><span lang="en">原作答：${esc(q.answer)}</span>`:''}${!q.correct?`<br>${esc(q.cause || '待分析')}<br>${esc(q.evidence || '回到对应题目的解析或音频复习即可。')}`:''}</div>`).join('')}</details></div><footer class="lesson-footer"><a class="text-button" href="#records">查看学习记录 ↗</a><div class="button-row" style="margin:0"><button class="button secondary small" data-action="redo-attempt" data-id="${esc(a.id)}">重做这一组</button><button class="button" data-action="next">返回大厅，领取下一组 →</button></div></footer>`;
 }
 function renderGeneral(task) {
   const note = state.taskNotes?.[task.id] || {};
   const source = state.attempts.find(a=>a.id===task.analysisOf&&a.completedAt) || (task.sourceDay ? state.attempts.find(a=>a.day===task.sourceDay&&a.subject===task.type&&a.completedAt&&!a.redo) : null);
   let content = '';
-  if (task.type==='vocabulary') {
-    const words = state.vocabulary.filter(w=>w.day===task.day);
-    content = `<div class="banner">先用20分钟回忆到期错题，再用30分钟整理当天真题中的词汇。新增最多20个，优先记能再次遇到的词和搭配。</div>${dueReviews(state).length?`<a class="button secondary small" href="#reviews">复习 ${dueReviews(state).length} 道到期错题 →</a>`:'<p class="lead">今天暂时没有到期错题，可以回忆刚才的原文依据或听力关键词。</p>'}<div class="subheading">今天记住的词与替换</div><div class="vocab-tags">${words.map(w=>`<span lang="en">${esc(w.word)} · ${esc(w.meaning)} <button class="text-button" data-action="delete-word" data-id="${esc(w.id)}" aria-label="删除${esc(w.word)}">×</button></span>`).join('') || '<p class="lead">从今天的真题中挑词，每个词都带上意思或同义替换。</p>'}</div><form id="vocabForm" class="form-stack" style="margin-top:20px"><div class="form-grid"><label>单词 / 搭配<input name="word" maxlength="100" autocomplete="off" placeholder="例如：increase" required></label><label>含义 / 同义替换<input name="meaning" maxlength="200" placeholder="例如：增加；grow / rise" required></label></div><label>例句或题目出处<input name="example" maxlength="400" placeholder="例如：剑17 T1 Q1；原文中的用法"></label><button class="button secondary small" type="submit" ${words.length>=20?'disabled':''}>添加词汇（${words.length}/20）</button></form>`;
-  } else if (task.type==='reflection') {
-    const ref = state.reflections[task.day] || {};
-    content = `<div class="banner">今天的最后10分钟。写下一个具体收获和一个下一次要改变的动作，比只勾选“学完了”更有用。</div><div class="note-form"><label>今天真正弄懂了什么？<textarea data-reflection="learned" placeholder="例如：NOT GIVEN不是我不知道，而是原文没有足够信息。">${esc(ref.learned || '')}</textarea></label><label>下一次先改哪一个动作？<textarea data-reflection="next" placeholder="例如：先圈字数要求，检查答案单复数。">${esc(ref.next || '')}</textarea></label></div>`;
-  } else if (task.kind==='analysis') {
+  if (task.kind==='analysis') {
     const wrong = source?.questions.filter(q=>q.correct===false) || [];
     const checklist = task.type==='reading' ? ['找到错题对应的原文依据，分清定位、理解和规则问题。','精读2–3个关键段落，拆解影响答案的长句。','整理至少3组题干与原文的同义替换，合上书再解释一次。'] : [`挑${task.listeningPlan?.segments || 2}个困难片段，每段不超过${task.listeningPlan?.segmentSeconds || 15}秒；盲听最多3次再看文本。`,`理解后跟读，只听写${task.listeningPlan?.dictationSentences || 1}句关键句，不整段抄写。`,'合上文本原速重听，归类听辨、定位、干扰项或拼写问题。'];
-    content = `${source?`<div class="result-note">复盘第${task.sourceDay}天的${subjectName(task.type)}：${source.score?.correct ?? source.correctCount ?? 0} / ${source.questions.length}。先从失分最多的地方开始。</div>`:'<div class="banner warn">还没有找到对应的练习成绩。请使用当天实际做过的试卷，按下面步骤复盘并留下记录。</div>'}<div class="checklist">${checklist.map((s,i)=>`<label><input type="checkbox" data-check="${i}" ${note.checks?.[i]?'checked':''}><span>${s}</span></label>`).join('')}</div>${wrong.length?`<details class="details-block"><summary>回看 ${wrong.length} 道错题</summary>${wrong.map(q=>`<div class="review-answer"><b>${esc(q.label)} · ${esc(q.cause || '待分析')}</b><br>${esc(q.evidence || '暂未记录依据，请回到原文或音频寻找。')}</div>`).join('')}</details>`:''}<div class="subheading">复盘笔记（选填）</div><label>具体依据、同义替换或听辨发现<textarea data-task-note="${task.id}" placeholder="把发现写成下一次可执行的动作。">${esc(note.text || '')}</textarea></label>`;
+    content = `${source?`<div class="result-note">复盘第${task.sourceDay}组的${subjectName(task.type)}：${source.score?.correct ?? source.correctCount ?? 0} / ${source.questions.length}。先从失分最多的地方开始。</div>`:'<div class="banner warn">还没有找到对应的练习成绩。请使用对应任务实际做过的试卷，按下面步骤复盘并留下记录。</div>'}<div class="checklist">${checklist.map((s,i)=>`<label><input type="checkbox" data-check="${i}" ${note.checks?.[i]?'checked':''}><span>${s}</span></label>`).join('')}</div>${wrong.length?`<details class="details-block"><summary>回看 ${wrong.length} 道错题</summary>${wrong.map(q=>`<div class="review-answer"><b>${esc(q.label)} · ${esc(q.cause || '待分析')}</b><br>${esc(q.evidence || '暂未记录依据，请回到原文或音频寻找。')}</div>`).join('')}</details>`:''}<div class="subheading">复盘笔记（选填）</div><label>具体依据、同义替换或听辨发现<textarea data-task-note="${task.id}" placeholder="把发现写成下一次可执行的动作。">${esc(note.text || '')}</textarea></label>`;
   } else if (task.kind==='review') {
     content = `<div class="banner">当前没有足够的${subjectName(task.type)}错题需要重做。只复习已有内容，剩余时间回看同义替换，不凑题量。</div><a class="button secondary" href="#reviews">打开错题本</a><label style="margin-top:20px">这次复习发现<textarea data-task-note="${task.id}">${esc(note.text || '')}</textarea></label>`;
   } else {
-    content = `<div class="banner">今天轻量复习，不再靠大量刷题获得安全感。用真实模考成绩判断自己的节奏。</div><div class="checklist">${(task.type==='reading'?['回看常错的题型规则、字数和拼写。','确定做题顺序；阅读60分钟包含填答，没有额外转写时间。','回忆最常见的同义替换，检查机考键入习惯。']:['回看数字、日期、单复数及常错拼写。','记住原速播放一次，跟丢一题就准备下一题。','确认机考末尾核对规则；复习常见改口和干扰信号。']).map((s,i)=>`<label><input type="checkbox" data-check="${i}" ${note.checks?.[i]?'checked':''}><span>${s}</span></label>`).join('')}</div><label>带进考场的一句提醒（选填）<textarea data-task-note="${task.id}">${esc(note.text || '')}</textarea></label>`;
+    content = `<div class="banner">本组轻量复习，不再靠大量刷题获得安全感。用真实模考成绩判断自己的节奏。</div><div class="checklist">${(task.type==='reading'?['回看常错的题型规则、字数和拼写。','确定做题顺序；阅读60分钟包含填答，没有额外转写时间。','回忆最常见的同义替换，检查机考键入习惯。']:['回看数字、日期、单复数及常错拼写。','记住原速播放一次，跟丢一题就准备下一题。','确认机考末尾核对规则；复习常见改口和干扰信号。']).map((s,i)=>`<label><input type="checkbox" data-check="${i}" ${note.checks?.[i]?'checked':''}><span>${s}</span></label>`).join('')}</div><label>带进考场的一句提醒（选填）<textarea data-task-note="${task.id}">${esc(note.text || '')}</textarea></label>`;
   }
   const adapt = getAdaptation(state,task);
-  return `<div class="lesson-body"><div class="subject-label">${subjectName(task.type)} · ${kindName(task.kind)}</div><h2>${esc(task.title)}</h2>${adapt?`<div class="banner warn">先安排${adapt.minutes}分钟补强：${esc(adapt.action)}。${esc(adapt.reason)}</div>`:''}${renderListeningPlan(task)}<div style="margin-top:20px">${content}</div></div><footer class="lesson-footer"><small>认真留下记录，再翻到下一项。</small><button class="button" data-action="complete-general" data-task="${task.id}">完成这一项 →</button></footer>`;
+  return `<div class="lesson-body"><div class="subject-label">${subjectName(task.type)} · ${kindName(task.kind)}</div><h2>${esc(task.title)}</h2><div class="resource-list">${resourcesHtml(task)}</div>${adapt?`<div class="banner warn">先安排${adapt.minutes}分钟补强：${esc(adapt.action)}。${esc(adapt.reason)}</div>`:''}${renderListeningPlan(task)}<div style="margin-top:20px">${content}</div></div><footer class="lesson-footer"><small>完成本组后，可自行领取下一组。</small><button class="button" data-action="complete-general" data-task="${task.id}">完成这组任务 →</button></footer>`;
 }
 function renderRoadmap() {
-  const current = getCurrentTask(state)?.day;
-  return `${head('30天，每一天都有方向。','先补基础，再练题型，最后用全新试卷检验。','YOUR 30-DAY ROUTE')}<div class="banner">日历是一条路线，不是跳关按钮。今日任务会接续未完成的位置；可以查看后面的安排。</div>${PHASES.map(p=>`<section class="route-section"><div class="phase-heading"><h2>${esc(p.title)}</h2><small>第${p.from}–${p.to}天 · ${esc(p.description)}</small></div><div class="roadmap-grid">${DAYS.filter(d=>d.day>=p.from&&d.day<=p.to).map(d=>`<button class="day-card ${d.day===current?'current-day':''}" data-action="preview-day" data-day="${d.day}"><div class="day-card-head"><strong>${String(d.day).padStart(2,'0')}</strong><span class="pill ${dayDone(d.day)?'green':d.day===current?'':'neutral'}">${dayDone(d.day)?'已完成':d.day===current?'进行中':'查看安排'}</span></div><h3>${esc(d.title)}</h3><p><b>阅读</b>${esc(d.reading.title)}</p><p><b>听力</b>${esc(d.listening.title)}</p><div class="day-card-footer">${tasksForDay(state,d.day).map(t=>`<i class="${state.completed[t.id]?'done':''}"></i>`).join('')}</div></button>`).join('')}</div></section>`).join('')}`;
+  const subject = runtime.routeSubject, progress = subjectProgress(state,subject);
+  const next = progress.activeTask || progress.nextTask;
+  return `${head('一条循序渐进的训练路线。','每科30组，自行安排领取节奏。两科进度互不锁定。','YOUR LEARNING ROUTE')}<div class="method-tabs">${['listening','reading'].map(id=>`<button class="filter-button ${subject===id?'active':''}" data-action="route-filter" data-filter="${id}">${subjectName(id)}路线</button>`).join('')}</div>${subject==='listening'?renderListeningRoute():'<div class="banner">阅读从填空入门，再练判断、匹配与选择，最后用完整新卷检验。每组按顺序领取，难题有独立复盘任务。</div>'}<div class="roadmap-grid">${DAYS.map(d=>{
+    const t=tasksForDay(state,d.day).find(t=>t.type===subject), done=!!state.completed[t.id], claimed=!!state.claimedTasks?.[t.id];
+    return `<button class="day-card ${t.id===next?.id?'current-day':''}" data-action="preview-task" data-day="${d.day}" data-subject="${subject}"><div class="day-card-head"><strong>${String(d.day).padStart(2,'0')}</strong><span class="pill ${done?'green':claimed?'':'neutral'}">${done?'已完成':claimed?'已领取':t.id===next?.id?'可领取':'路线预览'}</span></div><h3>${esc(t.title)}</h3><p>${kindName(t.kind)} · 建议${t.minutes}分钟</p>${t.focus?`<p>${esc(t.focus)}</p>`:''}</button>`;
+  }).join('')}</div>`;
 }
 function renderMethods() {
   const methods = Object.values(METHODS).filter(m=>runtime.methodFilter==='all'||m.subject===runtime.methodFilter);
-  return `${head('知道怎么练，才不白做题。','先掌握方法，再用真题验证。以下小示范均为原创，非剑桥题文。','PRACTICE WITH A METHOD',false)}<div class="method-tabs">${[['all','全部方法'],['reading','阅读'],['listening','听力']].map(([id,label])=>`<button class="filter-button ${runtime.methodFilter===id?'active':''}" data-action="method-filter" data-filter="${id}">${label}</button>`).join('')}</div><div class="method-grid">${methods.map(m=>`<article class="paper method-card"><span class="pill">${subjectName(m.subject)}</span><h3 style="margin-top:12px">${esc(m.title)}</h3><p>${esc(m.intro)}</p><details><summary>展开训练步骤与原创示范</summary><div style="margin-top:17px">${guideHtml(m)}${exampleHtml(m)}${m.pitfalls?.length?`<ul class="pitfalls">${m.pitfalls.map(t=>`<li>${esc(t)}</li>`).join('')}</ul>`:''}</div></details></article>`).join('')}</div>`;
+  return `${head('知道怎么练，才不白做题。','先掌握方法，再用真题验证。以下小示范均为原创，非剑桥题文。','PRACTICE WITH A METHOD',false)}<div class="method-tabs">${[['all','全部方法'],['reading','阅读'],['listening','听力']].map(([id,label])=>`<button class="filter-button ${runtime.methodFilter===id?'active':''}" data-action="method-filter" data-filter="${id}">${label}</button>`).join('')}</div>${runtime.methodFilter!=='reading'?renderListeningReferences():''}<div class="method-grid">${methods.map(m=>`<article class="paper method-card"><span class="pill">${subjectName(m.subject)}</span><h3 style="margin-top:12px">${esc(m.title)}</h3><p>${esc(m.intro)}</p><details><summary>展开训练步骤与原创示范</summary><div style="margin-top:17px">${guideHtml(m)}${exampleHtml(m)}${m.pitfalls?.length?`<ul class="pitfalls">${m.pitfalls.map(t=>`<li>${esc(t)}</li>`).join('')}</ul>`:''}</div></details></article>`).join('')}</div>`;
 }
 function renderReviews() {
   const due = dueReviews(state);
   const all = state.reviews || [];
   const list = runtime.reviewFilter==='all' ? all : due;
-  return `${head('把错过的，再做明白。','先遮住依据，回忆为什么选；再翻回教材验证。','RECALL · VERIFY · REMEMBER',false)}<div class="method-tabs"><button class="filter-button ${runtime.reviewFilter==='due'?'active':''}" data-action="review-filter" data-filter="due">到期复习 ${due.length}</button><button class="filter-button ${runtime.reviewFilter==='all'?'active':''}" data-action="review-filter" data-filter="all">全部错题 ${all.length}</button></div>${list.length?list.map(r=>`<article class="paper review-card"><div class="review-card-head"><div><span class="pill ${r.subject==='reading'?'':'neutral'}">${subjectName(r.subject)}</span><strong style="margin-left:9px">${esc(r.label)}</strong></div><span class="pill ${r.completed?'green':'neutral'}">${r.completed?'已完成三轮':`第${(r.stage||0)+1}轮 · ${esc(r.dueDate)}`}</span></div><p>失分原因：${esc(r.cause || '待分析')} · 累计出错 ${r.failures || 1} 次</p><details><summary>我已回忆，查看复习提醒</summary><div class="review-answer">${r.answer?`<b>当时作答：</b><span lang="en">${esc(r.answer)}</span><br>`:''}<b>复习提醒 / 依据：</b>${esc(r.evidence || '回到做题网站或教材，查看这道题的依据。')}</div></details><label style="margin-top:12px">补充一句复习提醒（选填）<input data-review-evidence="${esc(r.id)}" value="${esc(r.evidence || '')}" placeholder="例如：这题因改口听错，下次等完整句"></label>${!r.completed?`<div class="button-row"><button class="button small" data-action="review-pass" data-id="${esc(r.id)}" ${r.dueDate>dateKey()?'disabled title="未到复习日，可先回看依据"':''}>${r.dueDate>dateKey()?'未到复习日，先回看':'回忆正确，安排下一轮'}</button><button class="button secondary small" data-action="review-fail" data-id="${esc(r.id)}">仍不熟，明天再来</button></div>`:''}</article>`).join(''):`<div class="paper empty-state"><span>↺</span><h2>${all.length?'今天的到期错题已复习完':'错题本，从一次认真批改开始'}</h2><p>${all.length?'按1、3、7天的间隔回忆。现在可以继续今日训练。':'完成一组真题并标出对错，错题就会按题号出现在这里。'}</p><a class="button" href="#today">继续今日训练 →</a></div>`}`;
+  return `${head('把错过的，再做明白。','先遮住依据，回忆为什么选；再翻回教材验证。','RECALL · VERIFY · REMEMBER',false)}<div class="method-tabs"><button class="filter-button ${runtime.reviewFilter==='due'?'active':''}" data-action="review-filter" data-filter="due">到期复习 ${due.length}</button><button class="filter-button ${runtime.reviewFilter==='all'?'active':''}" data-action="review-filter" data-filter="all">全部错题 ${all.length}</button></div>${list.length?list.map(r=>`<article class="paper review-card"><div class="review-card-head"><div><span class="pill ${r.subject==='reading'?'':'neutral'}">${subjectName(r.subject)}</span><strong style="margin-left:9px">${esc(r.label)}</strong></div><span class="pill ${r.completed?'green':'neutral'}">${r.completed?'已完成三轮':`第${(r.stage||0)+1}轮 · ${esc(r.dueDate)}`}</span></div><p>失分原因：${esc(r.cause || '待分析')} · 累计出错 ${r.failures || 1} 次</p><details><summary>我已回忆，查看复习提醒</summary><div class="review-answer">${r.answer?`<b>当时作答：</b><span lang="en">${esc(r.answer)}</span><br>`:''}<b>复习提醒 / 依据：</b>${esc(r.evidence || '回到做题网站或教材，查看这道题的依据。')}</div></details><label style="margin-top:12px">补充一句复习提醒（选填）<input data-review-evidence="${esc(r.id)}" value="${esc(r.evidence || '')}" placeholder="例如：这题因改口听错，下次等完整句"></label>${!r.completed?`<div class="button-row"><button class="button small" data-action="review-pass" data-id="${esc(r.id)}" ${r.dueDate>dateKey()?'disabled title="未到复习日，可先回看依据"':''}>${r.dueDate>dateKey()?'未到复习日，先回看':'回忆正确，安排下一轮'}</button><button class="button secondary small" data-action="review-fail" data-id="${esc(r.id)}">仍不熟，明天再来</button></div>`:''}</article>`).join(''):`<div class="paper empty-state"><span>↺</span><h2>${all.length?'今天的到期错题已复习完':'错题本，从一次认真批改开始'}</h2><p>${all.length?'按1、3、7天的间隔回忆。现在可以返回任务大厅。':'完成一组真题并标出对错，错题就会按题号出现在这里。'}</p><a class="button" href="#today">返回任务大厅 →</a></div>`}`;
 }
 function renderRecords() {
   const attempts = state.attempts.filter(a=>a.completedAt).slice().reverse();
   const full = attempts.filter(a=>isFreshFullAttempt(a)).slice().reverse();
-  const done = Object.keys(state.completed).length;
+  const done = ['reading','listening'].reduce((n,subject)=>n+subjectProgress(state,subject).completed,0);
   const latest = subject=>attempts.find(a=>a.subject===subject&&isFreshFullAttempt(a));
   const rawScore = a=>a ? `${a.score?.correct ?? a.correctCount ?? 0}/40` : '—';
-  return `${head('用真实记录，看见进步。','首次与重做分开，专项与完整卷分开。没有练习数据时不生成示例成绩。','YOUR LEARNING RECORD',false)}<div class="metrics"><div class="metric"><small>阅读 · 最近全新完整卷</small><strong>${rawScore(latest('reading'))}</strong><span>训练目标稳定30/40</span></div><div class="metric"><small>听力 · 最近全新完整卷</small><strong>${rawScore(latest('listening'))}</strong><span>训练目标稳定30/40</span></div><div class="metric"><small>已完成训练</small><strong>${done}<span style="font-size:15px;color:#97a4b8"> / 120</span></strong><span>${DAYS.filter(d=>dayDone(d.day)).length}个训练日已完成</span></div><div class="metric"><small>个人词汇积累</small><strong>${state.vocabulary.length}</strong><span>来自自己的真题与同义替换</span></div></div>${full.length?`<section class="paper chart-panel"><div class="side-title"><h3>全新完整卷 · 首次正确题数</h3><small>满分40 · 深蓝阅读 / 浅蓝听力</small></div><div class="score-chart">${full.map(a=>{const correct=a.score?.correct??a.correctCount??0;return `<div class="score-column ${a.subject}"><strong>${correct}</strong><div class="bar" style="height:${correct/40*125}px"></div><small>D${a.day} · ${subjectName(a.subject)}</small></div>`;}).join('')}</div></section>`:''}<div class="button-row" style="margin:0 0 20px"><button class="button secondary small" data-action="export">导出学习备份</button><button class="button secondary small" data-action="import">导入备份</button><button class="text-button" data-action="settings">日期与已做试卷</button></div>${attempts.length?`<section class="paper records-table-wrap"><table class="records-table"><thead><tr><th>训练</th><th>科目</th><th>成绩</th><th>记录类型</th><th>用时</th><th>查看</th></tr></thead><tbody>${attempts.map(a=>`<tr><td>第${a.day}天 · ${esc(a.title || kindName(a.kind))}</td><td>${subjectName(a.subject)}</td><td><strong>${a.score?.correct??a.correctCount??0} / ${a.questions.length}</strong></td><td><span class="pill ${isFreshFullAttempt(a)?'green':'neutral'}">${a.redo?'重做':a.questions.length===40?(isFreshFullAttempt(a)?'全新完整卷':'完整卷练习'):'专项练习'}</span></td><td>${a.recordingMode==='self-check'&&!a.durationProvided?'未记录':fmtTime(a.elapsedSeconds)}</td><td><button class="text-button" data-action="view-attempt" data-id="${esc(a.id)}">回看 ↗</button></td></tr>`).join('')}</tbody></table></section>`:`<div class="paper empty-state"><span>▥</span><h2>第一份成绩，来自第一组练习</h2><p>完成作答和教材批改后，网站会记录结果。专项成绩只反映这组练习，不直接估算雅思分数。</p><a class="button" href="#today">开始今日训练 →</a></div>`}<div class="banner" style="margin-top:22px">3.5是起点自评，6.5是冲刺目标。正式分数取决于实际考试；请结合完整新卷表现判断准备程度。</div>`;
+  return `${head('用真实记录，看见进步。','首次与重做分开，专项与完整卷分开。没有练习数据时不生成示例成绩。','YOUR LEARNING RECORD',false)}<div class="metrics"><div class="metric"><small>阅读 · 最近全新完整卷</small><strong>${rawScore(latest('reading'))}</strong><span>训练目标稳定30/40</span></div><div class="metric"><small>听力 · 最近全新完整卷</small><strong>${rawScore(latest('listening'))}</strong><span>训练目标稳定30/40</span></div><div class="metric"><small>已完成训练</small><strong>${done}<span style="font-size:15px;color:#97a4b8"> / 60</span></strong><span>阅读、听力任务独立累计</span></div><div class="metric"><small>领取后待完成</small><strong>${getClaimedTasks(state).length}</strong><span>可随时接续已领取的任务</span></div></div>${full.length?`<section class="paper chart-panel"><div class="side-title"><h3>全新完整卷 · 首次正确题数</h3><small>满分40 · 深蓝阅读 / 浅蓝听力</small></div><div class="score-chart">${full.map(a=>{const correct=a.score?.correct??a.correctCount??0;return `<div class="score-column ${a.subject}"><strong>${correct}</strong><div class="bar" style="height:${correct/40*125}px"></div><small>第${a.day}组 · ${subjectName(a.subject)}</small></div>`;}).join('')}</div></section>`:''}<div class="button-row" style="margin:0 0 20px"><button class="button secondary small" data-action="export">导出学习备份</button><button class="button secondary small" data-action="import">导入备份</button><button class="text-button" data-action="settings">已做试卷设置</button></div>${attempts.length?`<section class="paper records-table-wrap"><table class="records-table"><thead><tr><th>训练</th><th>科目</th><th>成绩</th><th>记录类型</th><th>用时</th><th>查看</th></tr></thead><tbody>${attempts.map(a=>`<tr><td>第${a.day}组 · ${esc(a.title || kindName(a.kind))}</td><td>${subjectName(a.subject)}</td><td><strong>${a.score?.correct??a.correctCount??0} / ${a.questions.length}</strong></td><td><span class="pill ${isFreshFullAttempt(a)?'green':'neutral'}">${a.redo?'重做':a.questions.length===40?(isFreshFullAttempt(a)?'全新完整卷':'完整卷练习'):'专项练习'}</span></td><td>${a.recordingMode==='self-check'&&!a.durationProvided?'未记录':fmtTime(a.elapsedSeconds)}</td><td><button class="text-button" data-action="view-attempt" data-id="${esc(a.id)}">回看 ↗</button></td></tr>`).join('')}</tbody></table></section>`:`<div class="paper empty-state"><span>▥</span><h2>第一份成绩，来自第一组练习</h2><p>在做题网站完成并核对后，网站会记录结果。专项成绩只反映这组练习，不直接估算雅思分数。</p><a class="button" href="#today">领取第一组任务 →</a></div>`}<div class="banner" style="margin-top:22px">3.5是起点自评，6.5是冲刺目标。正式分数取决于实际考试；请结合完整新卷表现判断准备程度。</div>`;
 }
 
 function currentFocusedAttempt() {
@@ -232,12 +250,14 @@ function authModal() {
   openModal(`<h2>让每台设备，都接着练。</h2><p>登录后，手机和电脑可以接续同一份学习记录。</p><div class="auth-tabs"><button class="auth-tab ${runtime.authMode==='login'?'active':''}" data-action="auth-tab" data-tab="login">登录已有账号</button><button class="auth-tab ${runtime.authMode==='signup'?'active':''}" data-action="auth-tab" data-tab="signup">注册新账号</button></div><form id="authForm" class="form-stack"><label>邮箱<input name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label>密码<input name="password" type="password" autocomplete="${runtime.authMode==='signup'?'new-password':'current-password'}" minlength="8" placeholder="至少8位" required></label><p class="form-message" id="authMessage" role="status"></p><button class="button full" type="submit">${runtime.authMode==='signup'?'注册并开始训练':'登录并同步'}</button></form><div class="divider"></div><p class="offline-note">未登录也能先在当前浏览器练习。新账号不会自动混入访客或其他账号的记录；如需迁移，先导出，再登录导入。</p>${!cloud.configured?'<div class="banner warn" style="margin-top:15px">云端尚未配置，当前可使用本机训练与备份。</div>':''}`);
 }
 function settingsModal() {
-  openModal(`<h2>让计划贴合你的起点</h2><p>已经做过、看过原文、答案或听力文本的试卷，请按科目勾选。网站会为诊断和模考优先换新卷。</p><label>30天计划开始日期<input id="startDateInput" type="date" value="${esc(state.profile.startDate)}"></label><div class="divider"></div>${['reading','listening'].map(subject=>`<h3 style="margin-top:18px">${subjectName(subject)} · 已见试卷</h3><div class="exposure-grid">${[15,16,17,18,19,20].map(book=>`<div class="exposure-book"><strong>剑${book}</strong>${[1,2,3,4].map(test=>`<label><input type="checkbox" data-exposure="${subject}" data-book="${book}" data-test="${test}" ${state.exposures[`${subject}-${book}-${test}`]?.seen?'checked':''}>Test ${test}</label>`).join('')}</div>`).join('')}</div>`).join('')}<div class="banner" style="margin-top:20px">新卷替补顺序：剑19 T3、T4 → 剑20 T1–T4。已练内容会持续标为已见；两科分别判断。</div><div class="button-row"><button class="button" data-action="save-settings">保存设置</button><button class="button secondary" data-action="close-modal">返回训练</button></div>`);
+  openModal(`<h2>让计划贴合你的起点</h2><p>已经做过、看过原文、答案或听力文本的试卷，请按科目勾选。网站会为诊断和模考优先换新卷。</p><div class="divider"></div>${['reading','listening'].map(subject=>`<h3 style="margin-top:18px">${subjectName(subject)} · 已见试卷</h3><div class="exposure-grid">${[15,16,17,18,19,20].map(book=>`<div class="exposure-book"><strong>剑${book}</strong>${[1,2,3,4].map(test=>`<label><input type="checkbox" data-exposure="${subject}" data-book="${book}" data-test="${test}" ${state.exposures[`${subject}-${book}-${test}`]?.seen?'checked':''}>Test ${test}</label>`).join('')}</div>`).join('')}</div>`).join('')}<div class="banner" style="margin-top:20px">新卷替补顺序：剑19 T3、T4 → 剑20 T1–T4。已练内容会持续标为已见；两科分别判断。</div><div class="button-row"><button class="button" data-action="save-settings">保存设置</button><button class="button secondary" data-action="close-modal">返回训练</button></div>`);
 }
-function previewDay(day) {
-  const d = DAYS[day-1]; if (!d) return;
-  const current = getCurrentTask(state)?.day;
-  openModal(`<div class="overline">DAY ${String(day).padStart(2,'0')} / 30</div><h2>${esc(d.title)}</h2><p>${esc(phaseFor(day)?.title || '')} · ${dayDone(day)?'已完成':day===current?'当前训练日':'路线预览'}</p>${['reading','listening'].map(subject=>{const t={...d[subject],type:subject};return `<div class="subheading">${subjectName(subject)} · ${esc(t.title)}</div><div class="resource-list">${resourcesHtml(t)}</div>${!t.resources.length?`<p class="lead">${t.kind==='analysis'?`复盘第${t.sourceDay}天实际做过的试卷。`:'回看错题与已经记录的方法。'}</p>`:''}`;}).join('')}<div class="banner">另有20分钟错题回忆、30分钟真题词汇、10分钟小结。阅读${tasksForDay(state,day)[0].minutes}分钟，听力${tasksForDay(state,day)[1].minutes}分钟。</div><div class="button-row"><button class="button" data-action="return-today">${day===current?'继续今天的训练':'返回当前任务'} →</button></div>`);
+function previewDay(day, subject = runtime.routeSubject) {
+  const planned=tasksForDay(state,day).find(t=>t.type===subject); if(!planned)return;
+  const task=state.claimedTasks?.[planned.id] ? resolveTask(state,planned) : planned;
+  const progress=subjectProgress(state,subject), available=(progress.activeTask || progress.nextTask)?.id===task.id;
+  const done=!!state.completed[task.id];
+  openModal(`<div class="overline">${subjectName(subject)} · 第${day} / 30组</div><h2>${esc(task.title)}</h2><p>${done?'已完成':state.claimedTasks?.[task.id]?'已领取':available?'可以领取':'后续任务预览'} · 建议${task.minutes}分钟</p><div class="resource-list">${resourcesHtml(task)}</div>${renderListeningPlan(task)}${!task.resources.length?`<p class="lead">${task.kind==='analysis'?`复盘第${task.sourceDay}组实际做过的试卷。`:'回看错题与已经记录的方法。'}</p>`:''}<details class="details-block"><summary>查看训练步骤</summary>${guideHtml(METHODS[task.methodId])}</details><div class="button-row">${available?`<button class="button" data-action="claim-task" data-task="${task.id}">${progress.activeTask?'继续这组任务':'领取这组任务'} →</button>`:''}<button class="button secondary" data-action="close-modal">返回路线</button></div>${!available&&!done?'<p class="offline-note">完成这一科已领取的任务后，再领取下一组；另一科可以独立领取。</p>':''}`);
 }
 function exportBackup() {
   const data = {app:'ielts-coach',version:1,exportedAt:new Date().toISOString(),state};
@@ -260,7 +280,9 @@ document.addEventListener('click', async e=>{
   const el=e.target.closest('[data-action]');if(!el)return;
   const action=el.dataset.action;
   try {
-    if(action==='select-task') {
+    if(action==='claim-task') {
+      claimTask(state,el.dataset.task);runtime.focusAttempt=null;persist();closeModal();location.hash='today';render();window.scrollTo({top:0,behavior:'smooth'});
+    } else if(action==='select-task') {
       clearTimeout(runtime.saveTimer);
       selectTask(state,el.dataset.task);runtime.focusAttempt=null;persist();render();window.scrollTo({top:0,behavior:'smooth'});
     } else if(action==='start') {
@@ -277,21 +299,19 @@ document.addEventListener('click', async e=>{
       if(a.questions.some(q=>typeof q.correct!=='boolean')){toast('请先对照教材，逐题标记正确或错误。');return;}
       if(['diagnostic','mock'].includes(a.kind)&&a.normalConditions!==true){a.normalConditions=false;a.fresh=false;a.conditionNote='未确认按考试条件完成，不纳入全新完整卷成绩。';}
       finishAttempt(state,a.id);runtime.focusAttempt=a.id;persist();render();window.scrollTo({top:0,behavior:'smooth'});
-    } else if(action==='next'){runtime.focusAttempt=null;state.selectedTaskId=getCurrentTask(state)?.id||null;persist();render();window.scrollTo({top:0,behavior:'smooth'});}
+    } else if(action==='next'){runtime.focusAttempt=null;state.selectedTaskId=null;persist();render();window.scrollTo({top:0,behavior:'smooth'});}
     else if(action==='complete-general'){
       const t=getSelectedTask(state);if(!t||t.id!==el.dataset.task)return;
-      if(t.type==='reflection') {
-        const n=state.reflections[t.day];if(!n?.learned?.trim()||!n?.next?.trim()){toast('请写下一个收获和下一次要改的动作。');return;}
-      } else if(t.type==='vocabulary'&&!state.vocabulary.some(w=>w.day===t.day)){toast('先从今天的真题中记录至少一个词或同义替换。');return;}
-      else if(['analysis','wrapup'].includes(t.kind)){
+      if(['analysis','wrapup'].includes(t.kind)){
         const n=state.taskNotes[t.id];if(!n?.checks?.every(Boolean)||n.checks.length<3){toast('完成三项回顾后即可保存，笔记可以不填。');return;}
       }
-      completeTask(state,t.id);state.selectedTaskId=getCurrentTask(state)?.id||null;persist();render();window.scrollTo({top:0,behavior:'smooth'});toast('已完成，也可以自由选择下一科。');
+      completeTask(state,t.id);state.selectedTaskId=null;persist();render();window.scrollTo({top:0,behavior:'smooth'});toast('本组已完成，下一组由你领取。');
     } else if(action==='method-filter'){runtime.methodFilter=el.dataset.filter;render();}
     else if(action==='review-filter'){runtime.reviewFilter=el.dataset.filter;render();}
     else if(action==='review-pass'||action==='review-fail'){
       recordReview(state,el.dataset.id,action==='review-pass');persist();render();toast(action==='review-pass'?'已安排下一轮复习。':'明天再回忆这道题。');
-    } else if(action==='preview-day')previewDay(Number(el.dataset.day));
+    } else if(action==='route-filter'){runtime.routeSubject=el.dataset.filter;render();}
+    else if(action==='preview-task')previewDay(Number(el.dataset.day),el.dataset.subject);
     else if(action==='return-today'){closeModal();location.hash='today';runtime.focusAttempt=null;render();}
     else if(action==='account')authModal();
     else if(action==='cloud-help')openModal(`<h2>一次性开启跨设备同步</h2><p>账号功能已接入，需要在你现有的云服务里创建本站独立学习表。本机练习与备份现在就能使用。</p><ol class="step-guide"><li><span>下载下面的建表脚本，打开对应 Supabase 项目的 SQL Editor。</span></li><li><span>粘贴脚本并运行一次，它只创建本站学习表和版本检查函数。</span></li><li><span>回到网站，使用同一邮箱在手机、电脑登录，再点击“读取云端最新记录”。</span></li></ol><div class="button-row"><a class="button" href="./supabase-setup.sql" download>下载建表脚本</a><a class="button secondary" href="./README.md" target="_blank">打开部署说明</a></div>`);
@@ -299,8 +319,6 @@ document.addEventListener('click', async e=>{
     else if(action==='close-modal')closeModal();
     else if(action==='settings')settingsModal();
     else if(action==='save-settings'){
-      const v=$('#startDateInput').value;if(!/^\d{4}-\d{2}-\d{2}$/.test(v)){toast('请选择有效开始日期。');return;}
-      state.profile.startDate=v;
       document.querySelectorAll('[data-exposure]').forEach(input=>setExposure(state,input.dataset.exposure,Number(input.dataset.book),Number(input.dataset.test),input.checked));
       persist();closeModal();runtime.focusAttempt=null;render();toast('已保存，诊断和模考会优先使用未见卷。');
     } else if(action==='export')exportBackup();
@@ -316,8 +334,7 @@ document.addEventListener('click', async e=>{
     } else if(action==='redo-attempt'){
       const old=state.attempts.find(a=>a.id===el.dataset.id);if(!old?.completedAt)return;
       const task=tasksForDay(state,old.day).find(t=>t.id===old.taskId);const a=startAttempt(state,task);runtime.focusAttempt=a.id;location.hash='today';persist();render();
-    } else if(action==='delete-word'){
-      state.vocabulary=state.vocabulary.filter(w=>w.id!==el.dataset.id);persist();render();
+
     }
   } catch(err){toast(err.message || '操作暂未完成，记录已保留。');console.error(err);}
 });
@@ -328,7 +345,6 @@ document.addEventListener('input', e=>{
   else if(el.dataset.evidence!==undefined&&a)a.questions[Number(el.dataset.evidence)].evidence=el.value;
   else if(el.dataset.attemptNote&&a)a.note=el.value;
   else if(el.dataset.taskNote){state.taskNotes[el.dataset.taskNote]??={checks:[false,false,false],text:''};state.taskNotes[el.dataset.taskNote].text=el.value;}
-  else if(el.dataset.reflection&&t){state.reflections[t.day]??={learned:'',next:''};state.reflections[t.day][el.dataset.reflection]=el.value;}
   else if(el.dataset.reviewEvidence){const r=state.reviews.find(r=>r.id===el.dataset.reviewEvidence);if(r)r.evidence=el.value;}
   else return;
   saveSoon();
@@ -342,12 +358,7 @@ document.addEventListener('change',e=>{
   persist();
 });
 document.addEventListener('submit',async e=>{
-  if(e.target.id==='vocabForm'){
-    e.preventDefault();const t=currentResolvedTask();if(!t||t.type!=='vocabulary')return;
-    const data=new FormData(e.target);if(state.vocabulary.filter(w=>w.day===t.day).length>=20){toast('每天最多新增20个词，先把已有的记住。');return;}
-    const word=String(data.get('word')).trim(),meaning=String(data.get('meaning')).trim();if(!word||!meaning)return;
-    state.vocabulary.push({id:crypto.randomUUID(),day:t.day,word,meaning,example:String(data.get('example')).trim(),createdAt:new Date().toISOString()});persist();render();toast('已记下，记得回到原句里复习。');
-  } else if(e.target.id==='authForm'){
+  if(e.target.id==='authForm'){
     e.preventDefault();const data=new FormData(e.target),button=$('button[type=submit]',e.target),msg=$('#authMessage');button.disabled=true;msg.textContent='正在连接…';
     try {
       const result=runtime.authMode==='signup'?await cloud.signUp(String(data.get('email')).trim(),String(data.get('password'))):await cloud.signIn(String(data.get('email')).trim(),String(data.get('password')));

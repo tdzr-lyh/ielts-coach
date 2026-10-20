@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#2457d6">
-  <meta name="description" content="从3.5基础开始，用30天有方法地练习剑桥雅思听力与阅读。准确真题安排、分步训练、错题复习与学习记录。">
-  <title>听读有方 · 30天雅思教练</title>
+  <meta name="description" content="从3.5基础开始，按题型领取剑桥雅思听力与阅读任务。两科各30组，自由安排节奏，完成后记录对错、复盘与复习。">
+  <title>听读有方 · 雅思任务教练</title>
   <link rel="icon" href="./icons/icon-192.png">
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="stylesheet" href="./styles.css">
@@ -13,25 +13,25 @@
 <body>
   <a class="skip-link" href="#main">跳到训练内容</a>
   <aside class="sidebar">
-    <a href="#today" class="brand" aria-label="听读有方首页"><span class="brand-mark" aria-hidden="true">方</span><span><strong>听读有方</strong><small>YOUR DAILY IELTS COACH</small></span></a>
+    <a href="#today" class="brand" aria-label="听读有方任务大厅"><span class="brand-mark" aria-hidden="true">方</span><span><strong>听读有方</strong><small>YOUR IELTS PRACTICE COACH</small></span></a>
     <div class="sidebar-label">我的学习空间</div>
     <nav class="navigation" aria-label="主要导航">
-      <a href="#today" data-nav="today"><span aria-hidden="true">◫</span><b>今日训练</b></a>
-      <a href="#roadmap" data-nav="roadmap"><span aria-hidden="true">▦</span><b>30天路线</b></a>
+      <a href="#today" data-nav="today"><span aria-hidden="true">◫</span><b>任务大厅</b></a>
+      <a href="#roadmap" data-nav="roadmap"><span aria-hidden="true">▦</span><b>训练路线</b></a>
       <a href="#methods" data-nav="methods"><span aria-hidden="true">▤</span><b>训练方法</b></a>
       <a href="#reviews" data-nav="reviews"><span aria-hidden="true">↺</span><b>错题复习</b><em id="reviewBadge" hidden>0</em></a>
       <a href="#records" data-nav="records"><span aria-hidden="true">▥</span><b>学习记录</b></a>
     </nav>
-    <section class="goal-note"><span>这一次，有方法地练。</span><p><strong>3.5</strong><i>→</i><strong>6.5</strong></p><small>学术类 A 类 · 听力 & 阅读<br>30天冲刺，进步用练习验证。</small><button class="text-button" data-action="settings">调整开始日期与已做试卷 ↗</button></section>
+    <section class="goal-note"><span>这一次，有方法地练。</span><p><strong>3.5</strong><i>→</i><strong>6.5</strong></p><small>学术类 A 类 · 听力 & 阅读<br>两科各30组，按自己的节奏领取。<br>30天仅作参考，进步用练习验证。</small><button class="text-button" data-action="settings">已做试卷设置 ↗</button></section>
     <div class="sidebar-bottom"><span class="status-dot" id="syncDot"></span><span id="syncLabel">本机保存</span><button class="text-button" data-action="account">账号</button></div>
   </aside>
   <div class="workspace">
-    <header class="topbar"><a class="mobile-brand" href="#today">听读有方<span>30 DAY COACH</span></a><div class="breadcrumb" id="breadcrumb">我的学习空间 <span>/</span> 今日训练</div><div class="topbar-actions"><span class="today-date" id="todayDate"></span><button class="account-chip" data-action="account"><span class="avatar" id="avatar">我</span><span id="accountLabel">登录同步进度</span></button></div></header>
+    <header class="topbar"><a class="mobile-brand" href="#today">听读有方<span>IELTS PRACTICE COACH</span></a><div class="breadcrumb" id="breadcrumb">我的学习空间 <span>/</span> 任务大厅</div><div class="topbar-actions"><span class="today-date" id="todayDate"></span><button class="account-chip" data-action="account"><span class="avatar" id="avatar">我</span><span id="accountLabel">登录同步进度</span></button></div></header>
     <div id="cloudNotice" class="cloud-notice" role="status" hidden></div>
     <main id="main" tabindex="-1"></main>
     <footer class="footer"><span>一步一步，把做过的题变成会做的题。</span><span>学术类 · 机考训练 <a href="https://ielts.org/take-a-test/your-results/ielts-scoring-in-detail" target="_blank" rel="noopener">评分参考 ↗</a></span></footer>
   </div>
-  <nav class="mobile-nav" aria-label="手机导航"><a href="#today" data-nav="today">◫<span>今日</span></a><a href="#roadmap" data-nav="roadmap">▦<span>路线</span></a><a href="#methods" data-nav="methods">▤<span>方法</span></a><a href="#reviews" data-nav="reviews">↺<span>错题</span></a><a href="#records" data-nav="records">▥<span>记录</span></a></nav>
+  <nav class="mobile-nav" aria-label="手机导航"><a href="#today" data-nav="today">◫<span>任务</span></a><a href="#roadmap" data-nav="roadmap">▦<span>路线</span></a><a href="#methods" data-nav="methods">▤<span>方法</span></a><a href="#reviews" data-nav="reviews">↺<span>错题</span></a><a href="#records" data-nav="records">▥<span>记录</span></a></nav>
   <dialog id="modal"><div id="modalContent"></div><button class="modal-close" data-action="close-modal" aria-label="关闭弹窗">×</button></dialog>
   <div class="toast" id="toast" role="status" hidden></div>
   <input type="file" id="importFile" accept="application/json,.json" hidden>
