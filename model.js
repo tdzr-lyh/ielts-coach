@@ -1,4 +1,4 @@
-import { DAYS } from './curriculum.js';
+import { DAYS, LISTENING_COURSE_VERSION } from './curriculum.js';
 
 const DAY_MS = 86400000;
 const SUBJECTS = ['reading', 'listening'];
@@ -9,7 +9,7 @@ const uid = prefix => `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.
 const instant = value => (value instanceof Date ? value : new Date(value ?? Date.now())).toISOString();
 const exposureKey = (subject, book, test) => `${subject}-${book}-${test}`;
 const TASK_ID = /^d([1-9]|[12]\d|30)-(reading|listening|vocabulary|reflection)$/;
-const LISTENING_VERSION = 'listening-v3';
+const LISTENING_VERSION = LISTENING_COURSE_VERSION;
 // Pre-claim releases stored general lesson drafts only in taskNotes. These
 // positions must remain reviews when a later curriculum moves a new task here.
 const LEGACY_LISTENING_REVIEWS = {
@@ -174,7 +174,7 @@ export function normalizeState(raw) {
   for (const [taskId, timestamp] of Object.entries(record(source.completed))) if (timestamp) retainClaim(taskId, timestamp);
   for (const taskId of Object.keys(record(source.drafts))) retainClaim(taskId);
   for (const [taskId, note] of Object.entries(taskNotes)) if (note.text.trim() || note.checks.some(Boolean)) retainClaim(taskId);
-  return {
+  const normalized = {
     ...base, ...source, version: 1,
     selectedTaskId: subjectTask(source.selectedTaskId) ? source.selectedTaskId : null,
     profile: { ...base.profile, ...importedProfile,
@@ -188,6 +188,13 @@ export function normalizeState(raw) {
     exposures: copy(record(source.exposures)),
     reflections, attempts, reviews, vocabulary,
   };
+  // Upgrade the actual claimed cards and drafts before the first render. The
+  // curriculum and an already-open grading card must refer to the same Part.
+  for (const taskId of Object.keys(claimedTasks)) {
+    const identity = subjectTask(taskId);
+    if (identity?.subject === 'listening') tasksForDay(normalized, identity.day);
+  }
+  return normalized;
 }
 
 export function calendarInfo(state, now = new Date()) {
@@ -208,18 +215,95 @@ function savedAttempt(state, taskId) {
     state.attempts.find(attempt => attempt.taskId === taskId);
 }
 
-/** A claim alone is not study progress. Upgrade those old lesson cards safely. */
+function continuousPartResources(resources) {
+  const parts = new Map();
+  for (const resource of cleanResources(resources)) {
+    const firstPart = Math.floor((resource.from - 1) / 10) + 1;
+    const lastPart = Math.floor((resource.to - 1) / 10) + 1;
+    if (firstPart !== lastPart || resource.unit != null && resource.unit !== firstPart) return null;
+    const key = `${resource.book}-${resource.test}-${firstPart}`;
+    parts.set(key, { ...copy(resource), unit: firstPart, from: (firstPart - 1) * 10 + 1, to: firstPart * 10 });
+  }
+  // Keep very old multi-Part drafts intact rather than silently drop answers
+  // or turn one short task into a complete 40-question paper.
+  return parts.size === 1 ? [...parts.values()] : null;
+}
+
+function continuousListeningCard(task, resources, upgrade) {
+  const part = resources[0].unit;
+  const location = resources[0];
+  const reference = DAYS.find(day => day.listening.kind === 'practice' && day.listening.resources?.some(resource =>
+    resource.book === location.book && resource.test === location.test && resource.unit === part))?.listening;
+  const minutes = part === 1 ? 30 : 35;
+  const methods = { 1: 'l-form', 2: 'l-part2-mixed', 3: 'l-academic-mixed', 4: 'l-notes' };
+  const firstPassMinutes = part === 1 ? 15 : 18;
+  const reviewMinutes = minutes - firstPassMinutes - 4;
+  return {
+    id: task.id, day: task.day, type: 'listening', subject: 'listening', kind: 'practice',
+    curriculumVersion: LISTENING_VERSION, title: `完整Part ${part} · 接续原材料 · 10题`,
+    methodId: reference?.methodId || methods[part], resources: copy(resources), minutes, blockId: null,
+    continuousPart: true,
+    primaryQuestionType: reference?.primaryQuestionType || (part === 1 || part === 4 ? '填空' : '完整Part综合训练'),
+    questionTypeSummary: reference?.questionTypeSummary || '完整预读本Part的所有题目，按各题组说明连续作答。',
+    questionTypeGroups: copy(reference?.questionTypeGroups || []),
+    focus: '从本Part的第一题预读，按原速录音顺序连续完成10题；已经记录的对错和笔记继续保留。',
+    successCheck: '完整Part的10题都有首次结果；只处理仍未听清的1–2处，听清即可结束。',
+    listeningPlan: {
+      newQuestions: 10, firstPassMinutes, reviewMinutes, spellingMinutes: 2, recallMinutes: 2,
+      segments: 2, segmentSeconds: 20, dictationSentences: 0,
+      instruction: `原来截出的题组已补为同一录音的完整Part ${part}，从Q${resources[0].from}连续做至Q${resources[0].to}；已有标记保留，新补题先完成再标对错。只复盘实际卡点，不要求重做已解决的问题。`,
+    },
+    fresh: false, continuityUpgrade: upgrade,
+  };
+}
+
+/** Refresh unfinished cards too, while preserving their original recording. */
 function restorableAssignment(state, task) {
   const assignment = state.assignments[task.id];
   if (task.type !== 'listening' || task.curriculumVersion !== LISTENING_VERSION ||
-      !assignment || assignment.taskSnapshot?.curriculumVersion === LISTENING_VERSION) return assignment;
+      state.completed[task.id] || state.attempts.some(attempt => attempt.taskId === task.id && attempt.completedAt)) return assignment;
+  const active = state.attempts.find(attempt => attempt.taskId === task.id && !attempt.completedAt);
+  const previous = record(active?.taskSnapshot || assignment?.taskSnapshot);
+  if (previous.curriculumVersion === LISTENING_VERSION) return assignment;
+  const kind = active?.kind || previous.kind;
+  // Analysis and due-question reviews must keep their actual source; they are
+  // intentionally not ten new questions and are not broken-up listening tests.
+  if (kind && kind !== 'practice') return assignment;
   const note = record(state.taskNotes[task.id]);
-  const progressed = state.completed[task.id] || state.drafts[task.id] ||
-    state.attempts.some(attempt => attempt.taskId === task.id) ||
+  const progressed = active || state.drafts[task.id] ||
     String(note.text || '').trim() || (Array.isArray(note.checks) && note.checks.some(Boolean));
-  if (progressed) return assignment;
-  // Persist the new card immediately: a later checklist click must not make
-  // the abandoned old snapshot appear to be an already-started lesson again.
+  if (progressed) {
+    const resources = continuousPartResources(active?.resources || assignment?.resources || previous.resources);
+    if (!resources) return assignment;
+    const originalTaskSnapshot = Object.keys(previous).length ? copy(previous) : {
+      id: task.id, day: task.day, type: 'listening', kind: active?.kind || 'practice',
+      title: active?.title || '', methodId: active?.methodId || '', minutes: active?.minutes,
+      resources: copy(active?.resources || assignment?.resources || []),
+    };
+    const upgrade = {
+      version: LISTENING_VERSION, upgradedAt: new Date().toISOString(),
+      reason: `这组已更新为同一录音的完整Part ${resources[0].unit}（Q${resources[0].from}–${resources[0].to}），从本Part第一题顺序练习；原对错、笔记和用时已保留。已接触的录音只作练习，不计作全新模考。`,
+      originalTaskSnapshot, ...(active ? { originalQuestions: copy(active.questions || []) } : {}),
+    };
+    const snapshot = continuousListeningCard(task, resources, upgrade);
+    if (active) {
+      const byId = new Map((active.questions || []).map(question => [question.id, question]));
+      active.questions = questionsFor(snapshot).map(question => ({
+        ...question, correct: null, cause: '', evidence: '', ...copy(byId.get(question.id) || {}),
+      }));
+      for (const key of ['title', 'kind', 'methodId', 'minutes', 'curriculumVersion', 'blockId', 'focus', 'successCheck', 'listeningPlan', 'continuityUpgrade', 'continuousPart', 'primaryQuestionType', 'questionTypeSummary', 'questionTypeGroups']) active[key] = copy(snapshot[key]);
+      for (const key of ['sourceDay', 'analysisOf', 'instruction', 'adaptivePractice', 'adaptiveSelection', 'reviewChecklist', 'exposureNote']) delete active[key];
+      active.resources = copy(resources);
+      active.taskSnapshot = copy(snapshot);
+      active.fresh = false;
+      // A half-entered aggregate is not a finished score for the expanded Part.
+      for (const key of ['score', 'correctCount', 'total']) delete active[key];
+    }
+    state.assignments[task.id] = { ...assignment, resources: copy(resources), fresh: false, taskSnapshot: copy(snapshot) };
+    return state.assignments[task.id];
+  }
+  if (!assignment) return assignment;
+  // A claim without work can use the new course's material directly.
   const { adaptation, ...snapshot } = task;
   const { fresh, replacement, ...retained } = assignment;
   state.assignments[task.id] = { ...retained, resources: copy(task.resources || []), taskSnapshot: copy(snapshot) };
@@ -239,21 +323,31 @@ function adaptiveListeningPractice(state, task) {
     question.number > (part - 1) * 10 && question.number <= part * 10 && question.correct).length) : null;
   const part = !scores || scores[0] < 7 ? 1 : scores[1] < 6 ? 2 : scores[3] < 6 ? 4 : 3;
   const variants = {
-    1: { test: 3, methodId: 'l-form', label: 'Part 1笔记填空', focus: '预测信息类别，跟住连续定位，检查实际错词的拼写。' },
-    2: { test: 3, methodId: 'l-part2-mixed', label: 'Part 2双选、单选与匹配', focus: 'Q11–12双选、Q13–15单选、Q16–20匹配；分别确认规则并等待最终证据。' },
-    3: { test: 4, methodId: 'l-academic-mixed', label: 'Part 3双选与匹配', focus: 'Q21–24为两组双选，Q25–30为匹配；区分提议与最后确认的观点。' },
-    4: { test: 2, methodId: 'l-notes', label: 'Part 4笔记填空', focus: '借助小标题和结构信号跟听，漏一题后继续定位。' },
+    1: { book: 17, test: 3, methodId: 'l-form', label: 'Part 1笔记填空', focus: '预测信息类别，跟住连续定位，检查实际错词的拼写。' },
+    2: { book: 15, test: 2, methodId: 'l-part2-mixed', label: 'Part 2单选与地图', focus: 'Q11–14单选、Q15–20地图；先预读完整Part，原速连续听完，在题型转换时继续定位。' },
+    3: { book: 17, test: 4, methodId: 'l-academic-mixed', label: 'Part 3双选与匹配', focus: 'Q21–24为两组双选，Q25–30为匹配；区分提议与最后确认的观点。' },
+    4: { book: 17, test: 2, methodId: 'l-notes', label: 'Part 4笔记填空', focus: '借助小标题和结构信号跟听，漏一题后继续定位。' },
   };
   const variant = variants[part];
+  const groups = {
+    1: [{ from: 1, to: 10, type: '笔记填空', focus: true }],
+    2: [{ from: 11, to: 14, type: '单选', focus: true }, { from: 15, to: 20, type: '地图', focus: true }],
+    3: [{ from: 21, to: 22, type: '多选（双选）', focus: true }, { from: 23, to: 24, type: '多选（双选）', focus: true }, { from: 25, to: 30, type: '匹配', focus: true }],
+    4: [{ from: 31, to: 40, type: '笔记填空', focus: true }],
+  }[part];
   const reason = scores ? `第24组实际逐题结果：Part 1 ${scores[0]}/10、Part 2 ${scores[1]}/10、Part 3 ${scores[2]}/10、Part 4 ${scores[3]}/10；本组选择${variant.label}。` :
     '尚无第24组已完成的40题逐题结果，先用Part 1基础练习；这不是根据诊断成绩得出的判断。';
   const from = (part - 1) * 10 + 1;
-  return { ...task, title: `针对补强 · ${variant.label} · 10题`, methodId: variant.methodId,
-    resources: [{ book: 17, test: variant.test, unit: part, from, to: from + 9, verified: true,
-      sourceUrl: `https://engnovate.com/ielts-listening-tests/cambridge-ielts-17-academic-listening-test-${variant.test}/` }],
+  return { ...task, title: `完整Part ${part} · 10题｜针对补强：${variant.label}`, methodId: variant.methodId,
+    resources: [{ book: variant.book, test: variant.test, unit: part, from, to: from + 9, verified: true,
+      sourceUrl: `https://engnovate.com/ielts-listening-tests/cambridge-ielts-${variant.book}-academic-listening-test-${variant.test}/` }],
     focus: variant.focus,
+    continuousPart: true, primaryQuestionType: variant.label,
+    questionTypeGroups: groups,
+    questionTypeSummary: groups.map(group => `Q${group.from}–${group.to}${group.type}`).join('；'),
+    successCheck: `完整完成Part ${part}的Q${from}–${from + 9}全部10题并记录首次对错；只处理仍未解决的1–2处。`,
     listeningPlan: { ...task.listeningPlan,
-      instruction: `本组只练${variant.label}10题。先按题组要求预读，原速一次完成，再核对首次结果；只解决1–2处尚未听清的证据，不额外加量。` },
+      instruction: `本组练完整Part ${part}，从本Part第一题Q${from}开始，原速一次连续做到Q${from + 9}，所有题型都作答。${variant.focus}再核对首次结果，只解决1–2处尚未听清的证据，不额外加量。` },
     adaptiveSelection: { part, reason, diagnosticAttemptId: diagnostic?.id || null, partScores: scores },
   };
 }
@@ -264,14 +358,14 @@ function restoreStartedTask(task, attempt, assignment) {
   if (!attempt && !Object.keys(snapshot).length && !(['diagnostic', 'mock'].includes(task.kind) && assignment?.resources?.length)) return task;
   const restored = { ...copy(task), ...copy(snapshot) };
   if (Object.keys(snapshot).length) {
-    for (const key of ['sourceDay', 'analysisOf', 'blockId', 'focus', 'successCheck', 'listeningPlan', 'instruction', 'adaptivePractice', 'adaptiveSelection', 'reviewChecklist', 'exposureNote']) {
+    for (const key of ['sourceDay', 'analysisOf', 'blockId', 'focus', 'successCheck', 'listeningPlan', 'instruction', 'adaptivePractice', 'adaptiveSelection', 'reviewChecklist', 'exposureNote', 'continuityUpgrade', 'continuousPart', 'primaryQuestionType', 'questionTypeSummary', 'questionTypeGroups']) {
       if (!Object.hasOwn(snapshot, key)) delete restored[key];
     }
   }
   // An old snapshot must not inherit new course rules or a new dynamic lesson.
   if (task.type === 'listening' && (attempt || Object.keys(snapshot).length) && snapshot.curriculumVersion !== LISTENING_VERSION) {
     restored.curriculumVersion = snapshot.curriculumVersion || attempt?.curriculumVersion || 'listening-legacy';
-    for (const key of ['adaptivePractice', 'adaptiveSelection', 'reviewChecklist', 'exposureNote']) if (!Object.hasOwn(snapshot, key)) delete restored[key];
+    for (const key of ['adaptivePractice', 'adaptiveSelection', 'reviewChecklist', 'exposureNote', 'continuityUpgrade', 'continuousPart', 'primaryQuestionType', 'questionTypeSummary', 'questionTypeGroups']) if (!Object.hasOwn(snapshot, key)) delete restored[key];
   }
   if (!attempt && assignment) {
     if (Array.isArray(assignment.resources)) restored.resources = copy(assignment.resources);
@@ -285,9 +379,9 @@ function restoreStartedTask(task, attempt, assignment) {
     // Older attempts predate full snapshots. Keep known metadata and avoid
     // attaching a newly introduced lesson/analysis source to a different paper.
     if (!Object.keys(snapshot).length && changed) {
-      for (const key of ['sourceDay', 'analysisOf', 'blockId', 'focus', 'successCheck', 'listeningPlan', 'instruction', 'adaptivePractice', 'adaptiveSelection', 'reviewChecklist', 'exposureNote']) delete restored[key];
+      for (const key of ['sourceDay', 'analysisOf', 'blockId', 'focus', 'successCheck', 'listeningPlan', 'instruction', 'adaptivePractice', 'adaptiveSelection', 'reviewChecklist', 'exposureNote', 'continuityUpgrade', 'continuousPart', 'primaryQuestionType', 'questionTypeSummary', 'questionTypeGroups']) delete restored[key];
     }
-    for (const key of ['kind', 'title', 'methodId', 'minutes', 'sourceDay', 'analysisOf', 'blockId', 'focus', 'successCheck', 'listeningPlan', 'instruction', 'curriculumVersion', 'adaptivePractice', 'adaptiveSelection', 'reviewChecklist', 'exposureNote']) {
+    for (const key of ['kind', 'title', 'methodId', 'minutes', 'sourceDay', 'analysisOf', 'blockId', 'focus', 'successCheck', 'listeningPlan', 'instruction', 'curriculumVersion', 'adaptivePractice', 'adaptiveSelection', 'reviewChecklist', 'exposureNote', 'continuityUpgrade', 'continuousPart', 'primaryQuestionType', 'questionTypeSummary', 'questionTypeGroups']) {
       if (Object.hasOwn(attempt, key) && attempt[key] !== undefined) restored[key] = copy(attempt[key]);
     }
     restored.resources = copy(attempt.resources || []);
@@ -464,7 +558,7 @@ export function resolveTask(state, task) {
   const subject = task.type || task.subject;
   if (prior) return { ...result, resources: copy(prior.resources), fresh: prior.completedAt ? false : prior.fresh, replacement: saved?.replacement };
   if (!['diagnostic', 'mock'].includes(result.kind)) {
-    return { ...result, fresh: (result.resources || []).length > 0 && !(result.resources || []).some(resource => hasExposure(state, subject, resource.book, resource.test)) };
+    return { ...result, fresh: !result.continuityUpgrade && (result.resources || []).length > 0 && !(result.resources || []).some(resource => hasExposure(state, subject, resource.book, resource.test)) };
   }
   let resources = copy(saved?.resources || task.resources || []);
   let replacement = saved?.replacement;
