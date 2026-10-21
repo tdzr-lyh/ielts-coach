@@ -60,7 +60,7 @@ test('填空题号与多资源题号保持准确，分析任务不生成重复�
   duplicate.resources.push(...duplicate.resources);
   assert.equal(questionsFor(duplicate).length, 40);
   assert.deepEqual(questionsFor({ ...task(), kind: 'analysis' }), []);
-  assert.deepEqual(questionsFor(tasksForDay(state, 2)[1]), []);
+  assert.deepEqual(questionsFor(tasksForDay(state, 6)[1]), []);
 });
 
 test('进度跟随首个未完成任务，30天截止日期按日历计算', () => {
@@ -173,15 +173,15 @@ test('错题按次日、第3日、第7日复习；未通过次日再来', () => 
   assert.equal(review.history.length, 4);
 });
 
-test('阅读24组和听力28组按到期日、错误次数选阅读8题及听力10题', () => {
+test('阅读24组按到期日和错误次数选8题，听力错题仍保留到期队列', () => {
   const state = createState();
   for (const subject of ['reading', 'listening']) for (let number = 1; number <= 12; number++) {
     state.reviews.push({ id: `${subject}-${number}`, questionId: `q-${subject}-${number}`, subject, book: 17, test: 1, unit: 1,
       number, label: `Q${number}`, dueDate: '2020-01-01', createdAt: '2020-01-01T08:00:00Z', failures: number, stage: 0, completed: false });
   }
-  const reading = tasksForDay(state, 24)[0], listening = tasksForDay(state, 28)[1];
+  const reading = tasksForDay(state, 24)[0];
   assert.equal(reading.reviewItems.length, 8);
-  assert.equal(listening.reviewItems.length, 10);
+  assert.equal(dueReviews(state).filter(review => review.subject === 'listening').length, 12);
   assert.equal(reading.reviewItems[0].number, 12);
   assert.equal(reading.resources[0].book, 17);
   assert.equal(reading.resources[0].from, 5);
@@ -591,21 +591,24 @@ test('第14天听力20题专项不足70%只调配20分钟，阅读仍用40题23�
   assert.equal(getAdaptation(state, { type: 'reading', day: 15 }).minutes, 30);
 });
 
-test('听力从5题起步，仅保留三套完整卷，每日做题复盘拼写回忆合计等于预算', () => {
+test('听力从完整Part 1起步，三套整卷后分别复盘，专项时间不按题数凑长', () => {
   const state = createState();
-  assert.equal(questionsFor(tasksForDay(state, 1)[1]).length, 5);
-  assert.equal(questionsFor(tasksForDay(state, 7)[1]).length, 10);
-  assert.equal(questionsFor(tasksForDay(state, 14)[1]).length, 0);
+  for (let day = 1; day <= 5; day++) assert.equal(questionsFor(tasksForDay(state, day)[1]).length, 10);
+  assert.equal(questionsFor(tasksForDay(state, 7)[1]).length, 5);
+  assert.equal(questionsFor(tasksForDay(state, 14)[1]).length, 6);
   const full = DAYS.filter(day => ['diagnostic', 'mock'].includes(day.listening.kind));
-  assert.deepEqual(full.map(day => [day.day, day.listening.resources[0].book, day.listening.resources[0].test]), [[23, 19, 2], [26, 18, 1], [29, 18, 2]]);
+  assert.deepEqual(full.map(day => [day.day, day.listening.resources[0].book, day.listening.resources[0].test]), [[24, 19, 2], [27, 18, 1], [29, 18, 2]]);
   for (const day of DAYS) {
     const plan = day.listening.listeningPlan;
     assert.equal(plan.firstPassMinutes + plan.reviewMinutes + plan.spellingMinutes + plan.recallMinutes, day.listening.minutes);
-    assert.ok(day.listening.minutes >= 45 && day.listening.minutes <= 75);
+    assert.ok(day.listening.minutes >= 15 && day.listening.minutes <= 55);
+    if (day.listening.kind === 'practice') assert.ok(day.listening.minutes <= 40);
     assert.equal(plan.newQuestions, ['analysis', 'review', 'wrapup'].includes(day.listening.kind) ? 0 : questionsFor({ ...day.listening, type: 'listening' }).length);
-    assert.ok(plan.segments <= 3 && plan.segmentSeconds <= 20 && plan.dictationSentences <= 2);
+    assert.ok(plan.segments <= 2 && plan.segmentSeconds <= 20 && plan.dictationSentences <= 1);
+    assert.equal(day.listening.curriculumVersion, 'listening-v3');
   }
-  assert.equal(DAYS.reduce((total, day) => total + day.listening.listeningPlan.newQuestions, 0), 219);
+  assert.equal(DAYS.reduce((total, day) => total + day.listening.listeningPlan.newQuestions, 0), 279);
+  assert.equal(DAYS.reduce((total, day) => total + day.listening.minutes, 0), 880);
 });
 
 test('无模式旧草稿经normalize迁移后，已记录用时继续显示；显式未填的自评用时不被改写', () => {
@@ -631,17 +634,17 @@ test('无模式旧草稿经normalize迁移后，已记录用时继续显示；�
   assert.equal(fresh.durationSource, 'external');
 });
 
-test('旧版听力整卷复盘使用实际题量和教材，保留新版短精听预算', () => {
+test('整卷复盘使用实际替补教材和题量，保留新版短精听预算', () => {
   const state = createState();
-  const old = finish(state, task('listening', 1, { book: 19, test: 1 }), 18);
-  const review = tasksForDay(state, 2)[1];
+  const old = finish(state, task('listening', 24, { book: 20, test: 1 }), 18);
+  const review = tasksForDay(state, 25)[1];
   assert.equal(review.kind, 'analysis');
-  assert.equal(review.title, '复盘第1组听力 · 实际40题');
+  assert.equal(review.title, '复盘第24组听力 · 实际40题');
   assert.equal(review.analysisOf, old.id);
   assert.deepEqual(review.resources, old.resources);
-  assert.equal(review.minutes, DAYS[1].listening.minutes);
-  assert.deepEqual(review.listeningPlan, DAYS[1].listening.listeningPlan);
-  assert.ok(review.minutes <= 75);
+  assert.equal(review.minutes, DAYS[24].listening.minutes);
+  assert.deepEqual(review.listeningPlan, DAYS[24].listening.listeningPlan);
+  assert.ok(review.minutes <= 25);
   assert.deepEqual(questionsFor(review), []);
 });
 
@@ -679,8 +682,8 @@ test('完整新卷统一判定排除专项、重复题号、重做和未确认�
 
 test('听力按连续题型块推进，每块有目标和检查标准，复盘不产生新题', () => {
   assert.deepEqual(LISTENING_BLOCKS.map(block => [block.id, block.from, block.to]), [
-    ['fill', 1, 10], ['single', 11, 14], ['map', 15, 16], ['matching', 17, 18],
-    ['choice', 19, 20], ['integration', 21, 22], ['exam', 23, 30],
+    ['fill', 1, 6], ['single', 7, 10], ['map', 11, 13], ['matching', 14, 16],
+    ['choice', 17, 19], ['integration', 20, 23], ['exam', 24, 30],
   ]);
   for (const block of LISTENING_BLOCKS) {
     assert.ok(block.goal.length > 10 && block.readyWhen.length > 10);
@@ -692,7 +695,7 @@ test('听力按连续题型块推进，每块有目标和检查标准，复盘�
       assert.ok(entry.listening.successCheck.length > 5);
     }
   }
-  const reviewPairs = [[2, 1], [6, 5], [10, 9], [12, 11], [14, 13], [16, 15], [18, 17], [22, 21], [24, 23], [27, 26]];
+  const reviewPairs = [[6, 5], [13, 12], [25, 24], [28, 27], [30, 29]];
   for (const [reviewDay, practiceDay] of reviewPairs) {
     const review = DAYS[reviewDay - 1].listening;
     assert.equal(review.kind, 'analysis');
@@ -702,10 +705,10 @@ test('听力按连续题型块推进，每块有目标和检查标准，复盘�
     assert.equal(review.listeningPlan.newQuestions, 0);
     assert.equal(review.listeningPlan.firstPassMinutes, 0);
   }
-  assert.equal(DAYS[10].listening.methodId, 'l-single');
-  assert.equal(DAYS[12].listening.methodId, 'l-single');
-  assert.equal(DAYS[14].listening.methodId, 'l-map');
-  assert.equal(DAYS[16].listening.methodId, 'l-matching');
+  assert.equal(DAYS[6].listening.methodId, 'l-single');
+  assert.equal(DAYS[10].listening.methodId, 'l-map');
+  assert.equal(DAYS[13].listening.methodId, 'l-matching');
+  assert.equal(DAYS[18].listening.methodId, 'l-flow');
 });
 
 test('听力重排保持原阅读教材范围、诊断、模考及复盘来源', () => {
@@ -727,13 +730,14 @@ test('听力重排保持原阅读教材范围、诊断、模考及复盘来源',
   assert.deepEqual(actual, expected);
 });
 
-test('题型块首次结果低于70%才替换补强，未完成两组单选或只勾复盘不触发', () => {
+test('旧单选块快照继续按旧规则判断，未完成两组单选或只勾复盘不触发', () => {
   const low = createState();
-  finish(low, tasksForDay(low, 11)[1], 2);
+  const oldSingle = day => task('listening', day, day === 11 ? { book: 16, test: 1, from: 11, to: 14, kind: 'practice' } : { book: 17, test: 1, from: 21, to: 26, kind: 'practice' });
+  finish(low, oldSingle(11), 2);
   completeTask(low, 'd12-listening');
   assert.equal(getAdaptation(low, { type: 'listening', day: 15 }), null);
   assert.equal(low.attempts.length, 1);
-  finish(low, tasksForDay(low, 13)[1], 4);
+  finish(low, oldSingle(13), 4);
   completeTask(low, 'd14-listening');
   for (const day of [15, 16, 17]) {
     const adaptation = getAdaptation(low, { type: 'listening', day });
@@ -747,8 +751,8 @@ test('题型块首次结果低于70%才替换补强，未完成两组单选或�
   assert.equal(getAdaptation(low, { type: 'listening', day: 18 }), null);
   assert.equal(low.attempts.some(attempt => attempt.day === 14), false);
   const threshold = createState();
-  finish(threshold, tasksForDay(threshold, 11)[1], 3);
-  finish(threshold, tasksForDay(threshold, 13)[1], 4);
+  finish(threshold, oldSingle(11), 3);
+  finish(threshold, oldSingle(13), 4);
   assert.equal(getAdaptation(threshold, { type: 'listening', day: 15 }), null);
   const unrelated = createState();
   finish(unrelated, task('listening', 11, { book: 17, test: 1, from: 15, to: 20, kind: 'practice' }), 0);
@@ -759,13 +763,13 @@ test('题型块首次结果低于70%才替换补强，未完成两组单选或�
 test('旧版第14组20题或40题检查优先于新版单选块，达到门槛不误补强', () => {
   for (const [total, correct] of [[20, 14], [40, 23]]) {
     const state = createState();
-    finish(state, tasksForDay(state, 11)[1], 0);
-    finish(state, tasksForDay(state, 13)[1], 0);
+    finish(state, task('listening', 11, { book: 16, test: 1, from: 11, to: 14, kind: 'practice' }), 0);
+    finish(state, task('listening', 13, { book: 17, test: 1, from: 21, to: 26, kind: 'practice' }), 0);
     finish(state, task('listening', 14, { book: 19, test: 2, to: total, kind: total === 40 ? 'diagnostic' : 'practice' }), correct);
     assert.equal(getAdaptation(state, { type: 'listening', day: 15 }), null);
   }
   const state = createState();
-  finish(state, tasksForDay(state, 7)[1], 6);
+  finish(state, task('listening', 7, { book: 17, test: 2, from: 1, to: 10, kind: 'practice' }), 6);
   for (const day of [8, 9, 10]) {
     const adaptation = getAdaptation(state, { type: 'listening', day });
     assert.equal(adaptation.minutes, 20);
@@ -833,14 +837,23 @@ test('旧草稿、成绩和复盘笔记自动迁移为已领取，保留历史�
   assert.equal(normalizeState({ selectedTaskId: 'd1-vocabulary' }).selectedTaskId, null);
 });
 
-test('听力第28组只领到期错题至多10题，领取即冻结题组，继续时不变成整卷或新增错题', () => {
+test('旧版已领取听力到期复习快照保持最多10题，不变成新版整卷复盘或新增错题', () => {
   let state = createState();
   for (let day = 1; day <= 27; day++) completeTask(state, `d${day}-listening`);
-  const full = finish(state, tasksForDay(state, 26)[1], 28);
+  const full = finish(state, tasksForDay(state, 27)[1], 28);
   assert.equal(full.questions.length, 40);
   state.reviews = Array.from({ length: 12 }, (_, index) => ({ id: `review${index + 1}`, questionId: `listening-17-1-${index + 1}`, subject: 'listening',
     book: 17, test: 1, unit: 1, number: index + 1, label: `Q${index + 1}`, dueDate: '2020-01-01',
     createdAt: '2020-01-01T08:00:00Z', failures: 1, stage: 0, completed: false }));
+  const legacyReview = {
+    id: 'd28-listening', day: 28, type: 'listening', subject: 'listening', kind: 'review',
+    title: '旧版到期错题回忆', methodId: 'l-review', minutes: 50, curriculumVersion: 'listening-v2',
+    reviewItems: dueReviews(state).filter(review => review.subject === 'listening').slice(0, 10), reviewLimit: 10,
+    resources: [{ book: 17, test: 1, unit: 1, from: 1, to: 10 }],
+  };
+  state.claimedTasks['d28-listening'] = '2026-10-20T08:00:00Z';
+  state.assignments['d28-listening'] = { resources: legacyReview.resources, taskSnapshot: legacyReview };
+  state.taskNotes['d28-listening'] = { text: '已经开始回忆错题', checks: [true] };
   const claimed = claimTask(state, 'listening');
   assert.equal(claimed.day, 28);
   assert.equal(questionsFor(claimed).length, 10);
@@ -853,6 +866,9 @@ test('听力第28组只领到期错题至多10题，领取即冻结题组，继�
   assert.deepEqual(startAttempt(state, getSelectedTask(state)).questions.map(question => question.id), frozenIds);
   const empty = createState();
   for (let day = 1; day <= 27; day++) completeTask(empty, `d${day}-listening`);
+  empty.claimedTasks['d28-listening'] = '2026-10-20T08:00:00Z';
+  empty.assignments['d28-listening'] = { resources: [], taskSnapshot: { ...legacyReview, resources: [], reviewItems: [] } };
+  empty.taskNotes['d28-listening'] = { text: '旧复习笔记', checks: [] };
   const noDue = claimTask(empty, 'listening');
   assert.deepEqual(questionsFor(noDue), []);
   assert.deepEqual(noDue.resources, []);
@@ -896,14 +912,14 @@ test('旧general复盘草稿迁移保持原来源、笔记和勾选，不变成�
   assert.equal(fallback.attempts.length, 0);
   const current = normalizeState({ claimedTasks: {}, taskNotes: { 'd15-listening': { text: '新地图笔记', checks: [true] } } });
   assert.equal(tasksForDay(current, 15)[1].kind, 'practice');
-  assert.equal(tasksForDay(current, 15)[1].methodId, 'l-map');
+  assert.equal(tasksForDay(current, 15)[1].methodId, 'l-matching');
 });
 
 test('已领取整卷遇到污染后，替补卷同时用于继续、路线预览与开始记录', () => {
   let state = createState();
-  for (let day = 1; day <= 22; day++) completeTask(state, `d${day}-listening`);
+  for (let day = 1; day <= 23; day++) completeTask(state, `d${day}-listening`);
   const claimed = claimTask(state, 'listening');
-  assert.equal(claimed.day, 23);
+  assert.equal(claimed.day, 24);
   assert.equal(claimed.resources[0].book, 19);
   assert.equal(claimed.resources[0].test, 2);
   setExposure(state, 'listening', 19, 2, true);
@@ -912,9 +928,182 @@ test('已领取整卷遇到污染后，替补卷同时用于继续、路线预�
   assert.equal(state.attempts.length, 0);
   assert.ok(state.assignments[claimed.id].taskSnapshot);
   state = normalizeState(JSON.parse(JSON.stringify(state)));
-  const preview = tasksForDay(state, 23)[1];
+  const preview = tasksForDay(state, 24)[1];
   assert.deepEqual(preview.resources, replacement.resources);
   assert.equal(preview.replacement, replacement.replacement);
   assert.equal(preview.fresh, true);
   assert.deepEqual(startAttempt(state, getSelectedTask(state)).resources, replacement.resources);
+});
+
+function listeningProfile(state, partScores) {
+  const selected = tasksForDay(state, 24)[1];
+  const attempt = startAttempt(state, selected);
+  attempt.questions.forEach(question => {
+    const part = Math.floor((question.number - 1) / 10);
+    question.correct = (question.number - 1) % 10 < partScores[part];
+  });
+  attempt.normalConditions = true;
+  finishAttempt(state, attempt.id);
+  return attempt;
+}
+
+test('第26组依据第24组实际逐题结果选择一个Part，按基础优先且不额外加时', () => {
+  const cases = [
+    [[6, 4, 4, 4], 1, 3, 'l-form'],
+    [[7, 5, 4, 4], 2, 3, 'l-part2-mixed'],
+    [[7, 6, 4, 5], 4, 2, 'l-notes'],
+    [[7, 6, 2, 6], 3, 4, 'l-academic-mixed'],
+    [[10, 10, 10, 10], 3, 4, 'l-academic-mixed'],
+  ];
+  for (const [scores, part, paper, method] of cases) {
+    const state = createState(), diagnostic = listeningProfile(state, scores);
+    // A cached aggregate cannot override the actual question marks.
+    diagnostic.score.correct = 40;
+    const selected = tasksForDay(state, 26)[1];
+    assert.equal(selected.adaptiveSelection.part, part);
+    assert.equal(selected.adaptiveSelection.diagnosticAttemptId, diagnostic.id);
+    assert.deepEqual(selected.adaptiveSelection.partScores, scores);
+    assert.equal(selected.methodId, method);
+    assert.equal(selected.minutes, 35);
+    assert.deepEqual(selected.resources.map(resource => [resource.book, resource.test, resource.unit, resource.from, resource.to]),
+      [[17, paper, part, (part - 1) * 10 + 1, part * 10]]);
+    assert.match(selected.resources[0].sourceUrl, new RegExp(`academic-listening-test-${paper}/$`));
+    assert.equal(questionsFor(selected).length, 10);
+    assert.equal(selected.adaptation.additionalMinutes, 0);
+    assert.equal(selected.adaptation.minutes, 0);
+  }
+});
+
+test('未完成、缺少逐题对错或只有汇总分的诊断不伪造补强判断', () => {
+  for (const mode of ['none', 'active', 'aggregate', 'incomplete']) {
+    const state = createState();
+    if (mode !== 'none') {
+      const diagnostic = startAttempt(state, tasksForDay(state, 24)[1]);
+      diagnostic.score = { correct: 35, total: 40 };
+      if (mode !== 'active') diagnostic.completedAt = new Date().toISOString();
+      if (mode === 'incomplete') diagnostic.questions.forEach((question, index) => question.correct = index === 39 ? null : true);
+    }
+    const selected = tasksForDay(state, 26)[1];
+    assert.equal(selected.adaptiveSelection.part, 1);
+    assert.equal(selected.adaptiveSelection.diagnosticAttemptId, null);
+    assert.match(selected.adaptiveSelection.reason, /尚无.*不是根据诊断成绩/);
+    assert.equal(selected.adaptation, null);
+  }
+});
+
+test('第26组领取即冻结补强教材和判断，后续诊断重做与刷新不静默换题', () => {
+  let state = createState();
+  listeningProfile(state, [6, 8, 8, 8]);
+  for (let day = 1; day <= 25; day++) completeTask(state, `d${day}-listening`);
+  const claimed = claimTask(state, 'listening');
+  assert.equal(claimed.adaptiveSelection.part, 1);
+  listeningProfile(state, [10, 10, 10, 10]);
+  state = normalizeState(JSON.parse(JSON.stringify(state)));
+  const restored = tasksForDay(state, 26)[1];
+  assert.deepEqual(restored.resources, claimed.resources);
+  assert.deepEqual(restored.adaptiveSelection, claimed.adaptiveSelection);
+  assert.equal(restored.adaptation.reason, claimed.adaptiveSelection.reason);
+  const attempt = startAttempt(state, restored);
+  assert.deepEqual(attempt.resources, claimed.resources);
+  assert.deepEqual(attempt.taskSnapshot.adaptiveSelection, claimed.adaptiveSelection);
+  assert.equal(attempt.questions.length, 10);
+});
+
+test('新版不按旧第7、11、13、14组编号塞入补强，仅在第6组给零加时建议', () => {
+  const state = createState();
+  finish(state, task('listening', 7, { book: 17, test: 2, to: 10, kind: 'practice' }), 0);
+  finish(state, task('listening', 14, { book: 19, test: 2 }), 0);
+  for (const day of [8, 9, 10, 15, 16, 17]) assert.equal(tasksForDay(state, day)[1].adaptation, null);
+  finish(state, tasksForDay(state, 5)[1], 6);
+  const review = tasksForDay(state, 6)[1];
+  assert.equal(review.adaptation.minutes, 0);
+  assert.equal(review.adaptation.additionalMinutes, 0);
+  assert.match(review.adaptation.reason, /6\/10/);
+  assert.equal(review.minutes, DAYS[5].listening.minutes);
+  const threshold = createState();
+  finish(threshold, tasksForDay(threshold, 5)[1], 7);
+  assert.equal(tasksForDay(threshold, 6)[1].adaptation, null);
+});
+
+test('仅领取未开始的旧听力卡自动采用新版10题预算，阅读快照保持原样', () => {
+  let state = createState();
+  const old = { ...task('listening', 1, { book: 16, test: 1, to: 5, kind: 'practice' }), title: '旧版5题', minutes: 45,
+    methodId: 'l-form', curriculumVersion: 'listening-v2' };
+  state.claimedTasks[old.id] = '2026-10-20T08:00:00Z';
+  state.assignments[old.id] = { resources: old.resources, taskSnapshot: old };
+  state.taskNotes[old.id] = { text: '   ', checks: [false] };
+  const reading = claimTask(state, 'reading');
+  const oldReadingSnapshot = JSON.stringify(state.assignments[reading.id]);
+  state = normalizeState(JSON.parse(JSON.stringify(state)));
+  const upgraded = tasksForDay(state, 1)[1];
+  assert.equal(upgraded.curriculumVersion, 'listening-v3');
+  assert.equal(questionsFor(upgraded).length, 10);
+  assert.equal(upgraded.minutes, 30);
+  assert.equal(resolveTask(state, upgraded).minutes, 30);
+  state.taskNotes[old.id] = { text: '按新版领取后补的笔记', checks: [true] };
+  assert.equal(tasksForDay(state, 1)[1].minutes, 30);
+  assert.equal(startAttempt(state, upgraded).questions.length, 10);
+  assert.equal(state.assignments[old.id].taskSnapshot.curriculumVersion, 'listening-v3');
+  assert.equal(JSON.stringify(state.assignments[reading.id]), oldReadingSnapshot);
+});
+
+test('旧听力有草稿、成绩、勾选或非空笔记时保留旧教材和预算，不继承新补强规则', () => {
+  for (const progress of ['attempt', 'completed', 'draft', 'check', 'note']) {
+    const state = createState();
+    const old = { ...task('listening', 1, { book: 16, test: 1, to: 5, kind: 'practice' }),
+      title: '旧版5题', minutes: 45, methodId: 'l-form' };
+    state.claimedTasks[old.id] = '2026-10-20T08:00:00Z';
+    state.assignments[old.id] = { resources: old.resources, taskSnapshot: old };
+    if (progress === 'attempt') startAttempt(state, old);
+    if (progress === 'completed') state.completed[old.id] = '2026-10-20T08:00:00Z';
+    if (progress === 'draft') state.drafts[old.id] = 'existing-draft';
+    if (progress === 'check') state.taskNotes[old.id] = { text: '', checks: [false, true] };
+    if (progress === 'note') state.taskNotes[old.id] = { text: '已完成听辨', checks: [] };
+    const restored = tasksForDay(normalizeState(state), 1)[1];
+    assert.equal(restored.curriculumVersion, 'listening-legacy');
+    assert.equal(restored.title, old.title);
+    assert.equal(restored.minutes, 45);
+    assert.deepEqual(restored.resources, old.resources);
+    assert.equal(questionsFor(restored).length, 5);
+    assert.equal(restored.adaptivePractice, undefined);
+  }
+});
+
+test('专项材料只在两处明确共享Part录音，地图位置准确且无重复作答题号', () => {
+  const partUses = new Map(), questionUses = new Set(), repeats = [];
+  for (const day of DAYS) {
+    const lesson = day.listening;
+    if (lesson.kind !== 'practice') continue;
+    for (const resource of lesson.resources) {
+      const key = `${resource.book}/${resource.test}/${resource.unit}`;
+      if (partUses.has(key)) repeats.push([day.day, partUses.get(key)]);
+      else partUses.set(key, day.day);
+      for (let number = resource.from; number <= resource.to; number++) {
+        const question = `${resource.book}/${resource.test}/${number}`;
+        assert.ok(!questionUses.has(question), `第${day.day}组重复安排了${question}`);
+        questionUses.add(question);
+      }
+    }
+  }
+  assert.deepEqual(repeats, [[12, 10], [17, 9]]);
+  assert.deepEqual(DAYS.filter(day => day.listening.exposureNote).map(day => day.day), [12, 17]);
+  for (const [day, paper] of [[11, 1], [12, 4]]) {
+    const lesson = DAYS[day - 1].listening;
+    assert.equal(lesson.methodId, 'l-map');
+    assert.deepEqual(lesson.resources.map(resource => [resource.book, resource.test, resource.unit, resource.from, resource.to]),
+      [[16, paper, 2, 15, 20]]);
+  }
+});
+
+test('旧任务快照不会继承当前课程的共享录音说明，新任务的说明会随快照保留', () => {
+  const legacy = createState();
+  const old = { ...task('listening', 12, { book: 16, test: 1, from: 11, to: 14, kind: 'practice' }),
+    title: '旧单选练习', minutes: 50, methodId: 'l-single' };
+  startAttempt(legacy, old);
+  assert.equal(tasksForDay(normalizeState(legacy), 12)[1].exposureNote, undefined);
+  const current = createState();
+  const selected = tasksForDay(current, 12)[1];
+  const attempt = startAttempt(current, selected);
+  assert.ok(attempt.taskSnapshot.exposureNote);
+  assert.equal(tasksForDay(normalizeState(current), 12)[1].exposureNote, selected.exposureNote);
 });

@@ -23,3 +23,6 @@
   .button,.filter-button,.grade-choice{min-height:42px}.form-meta{align-items:flex-start;font-size:12px}
   .form-meta input{flex:0 0 16px;width:16px;height:16px;margin-top:3px}.form-meta label{flex:1;font-size:12px}
 }
+
+.practice-budget{grid-template-columns:repeat(auto-fit,minmax(125px,1fr))}
+@media(max-width:650px){.practice-budget{grid-template-columns:repeat(auto-fit,minmax(105px,1fr))}}
